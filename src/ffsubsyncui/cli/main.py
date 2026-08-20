@@ -203,6 +203,8 @@ def command_batch(args: argparse.Namespace) -> int:
     if args.workers:
         config.concurrency = args.workers
         config.normalized()
+    if args.fast:
+        config.sync.multi_segment_sync = True
 
     video_dir, subtitle_dir = _resolve_folders(args.video_dir, args.subtitle_dir)
     if not video_dir.is_dir() or not subtitle_dir.is_dir():
@@ -267,6 +269,8 @@ def command_sync(args: argparse.Namespace) -> int:
         job.options.overwrite_input = True
     if args.replace:
         job.options.replace_output = True
+    if args.fast:
+        job.options.multi_segment_sync = True
 
     _echo(f"{args.subtitle.name} -> {output.name}")
     return _run_jobs([job], config, verbose=args.verbose)
@@ -375,6 +379,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     batch.add_argument("--workers", type=int, default=0, metavar="N")
     batch.add_argument("--dry-run", action="store_true")
+    batch.add_argument(
+        "--fast",
+        action="store_true",
+        help="sample short segments instead of reading each reference in full",
+    )
     batch.add_argument("-v", "--verbose", action="store_true")
     batch.set_defaults(handler=command_batch)
 
@@ -385,6 +394,11 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--overwrite", action="store_true", help="write over the input")
     sync.add_argument(
         "--replace", action="store_true", help="allow replacing an existing output"
+    )
+    sync.add_argument(
+        "--fast",
+        action="store_true",
+        help="sample short segments instead of reading the reference in full",
     )
     sync.add_argument("-v", "--verbose", action="store_true")
     sync.set_defaults(handler=command_sync)

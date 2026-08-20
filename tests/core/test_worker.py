@@ -152,3 +152,14 @@ def test_arguments_parse_with_the_real_ffsubsync_parser() -> None:
     assert namespace.srtout == "ep.en.synced.srt"
     assert namespace.vad == "auditok"
     assert namespace.skip_sync_on_low_quality is True
+
+
+def test_fast_mode_passes_segment_sampling() -> None:
+    """Fast mode is multi-segment sampling, nothing more."""
+    options = SyncOptions(multi_segment_sync=True, segment_count=6).to_dict()
+    arguments = _args(options=options)
+    assert "--multi-segment-sync" in arguments
+    assert _pairs(arguments, "--segment-count") == "6"
+    # --max-duration-seconds is deliberately NOT part of fast mode: truncating
+    # the reference can return a confidently wrong offset.
+    assert "--max-duration-seconds" not in arguments

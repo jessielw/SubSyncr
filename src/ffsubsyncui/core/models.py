@@ -168,7 +168,14 @@ class SyncOptions:
             ),
         )
 
-    def speech_cache_key(self) -> tuple[str, int, int, float, float | None]:
+    @property
+    def samples_reference(self) -> bool:
+        """Whether this reads short segments instead of the whole reference."""
+        return self.multi_segment_sync
+
+    def speech_cache_key(
+        self,
+    ) -> tuple[str, int, int, float, float | None, bool, int]:
         """Options baked into a serialized ``.npz`` speech array.
 
         Reusing a cached array under different values for any of these would
@@ -180,6 +187,8 @@ class SyncOptions:
             self.frame_rate,
             self.non_speech_label,
             self.max_duration_seconds,
+            self.multi_segment_sync,
+            self.segment_count,
         )
 
 

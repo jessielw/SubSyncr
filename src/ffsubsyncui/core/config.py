@@ -88,6 +88,8 @@ class AppConfig:
     history_limit: int = 2000
     # Start draining as soon as work is queued, rather than waiting for a click.
     auto_start: bool = True
+    # Default state of the per-batch "sample the audio" toggle.
+    fast_mode: bool = False
 
     def normalized(self) -> Self:
         """Clamp values a hand-edited config file could put out of range."""
@@ -111,6 +113,7 @@ class AppConfig:
             "speech_cache_enabled": self.speech_cache_enabled,
             "history_limit": self.history_limit,
             "auto_start": self.auto_start,
+            "fast_mode": self.fast_mode,
         }
 
     @classmethod
@@ -131,6 +134,7 @@ class AppConfig:
             ),
             history_limit=_int(value.get("history_limit"), default.history_limit),
             auto_start=bool(value.get("auto_start", default.auto_start)),
+            fast_mode=bool(value.get("fast_mode", default.fast_mode)),
         )
         return config.normalized()
 

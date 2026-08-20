@@ -6,7 +6,7 @@ had a chance to see, correct, or exclude.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Slot
@@ -100,6 +100,7 @@ class BatchMatchDialog(QDialog):
         *,
         threshold: float = DEFAULT_THRESHOLD,
         recursive: bool = True,
+        fast_mode: bool = False,
         output_suffix: str = ".synced",
         video_folder: str = "",
         subtitle_folder: str = "",
@@ -118,6 +119,17 @@ class BatchMatchDialog(QDialog):
         self.subtitle_folder.set_text(subtitle_folder)
         self.recursive = QCheckBox("Include subfolders", self)
         self.recursive.setChecked(recursive)
+        self.fast_mode = QCheckBox(
+            "Fast mode - sample the audio instead of reading the whole file", self
+        )
+        self.fast_mode.setChecked(fast_mode)
+        self.fast_mode.setToolTip(
+            "Extracts a handful of short segments spread across the reference "
+            "rather than decoding it end to end. On a long film that is "
+            "dramatically faster for the same answer; on a short episode there "
+            "is little to save. Segment count and intro/outro skipping live in "
+            "Settings, under Alignment."
+        )
         self.threshold = QDoubleSpinBox(self)
         self.threshold.setRange(0.0, 100.0)
         self.threshold.setSuffix(" %")
@@ -133,6 +145,7 @@ class BatchMatchDialog(QDialog):
         form.addRow("Video folder", self.video_folder)
         form.addRow("Subtitle folder", self.subtitle_folder)
         form.addRow("", self.recursive)
+        form.addRow("", self.fast_mode)
         form.addRow("Similarity threshold", self.threshold)
         source_box = QGroupBox("Source", self)
         source_layout = QVBoxLayout(source_box)
@@ -369,6 +382,13 @@ class BatchMatchDialog(QDialog):
     # -- result ----------------------------------------------------------
 
     def jobs(self) -> list[SyncJob]:
+        # Fast mode is a per-batch decision, so it is applied here rather than
+        # written back into the saved settings.
+        options = (
+            replace(self._options, multi_segment_sync=True)
+            if (self.fast_mode.isChecked())
+            else self._options
+        )
         keys: dict[Path, str] = {}
         jobs: list[SyncJob] = []
         for row in self._rows:
@@ -379,7 +399,7 @@ class BatchMatchDialog(QDialog):
                 build_job(
                     row.video,
                     row.subtitle,
-                    self._options,
+                    options,
                     output_suffix=self._output_suffix,
                     language=row.language,
                     group_key=key,

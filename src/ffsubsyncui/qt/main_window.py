@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import contextlib
 import time
 
 from PySide6.QtCore import QByteArray, QSettings, QSize, Qt, Slot
@@ -204,6 +205,7 @@ class MainWindow(QMainWindow):
             self.config.sync,
             threshold=self.config.match_threshold,
             recursive=self.config.recursive_scan,
+            fast_mode=self.config.fast_mode,
             output_suffix=self.config.output_suffix,
             video_folder=str(self.settings.value("match/videoFolder", "")),
             subtitle_folder=str(self.settings.value("match/subtitleFolder", "")),
@@ -213,16 +215,29 @@ class MainWindow(QMainWindow):
         # Remember the folders either way, so a cancelled scan is not retyped.
         self.settings.setValue("match/videoFolder", dialog.video_folder.text())
         self.settings.setValue("match/subtitleFolder", dialog.subtitle_folder.text())
+        self._remember_fast_mode(dialog.fast_mode.isChecked())
         if accepted:
             self._queue_jobs(dialog.jobs(), "Queued")
 
     @Slot()
     def _add_job(self) -> None:
         dialog = AddJobDialog(
-            self.config.sync, output_suffix=self.config.output_suffix, parent=self
+            self.config.sync,
+            output_suffix=self.config.output_suffix,
+            fast_mode=self.config.fast_mode,
+            parent=self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._remember_fast_mode(dialog.fast_mode.isChecked())
             self._queue_jobs([dialog.job()], "Queued")
+
+    def _remember_fast_mode(self, enabled: bool) -> None:
+        """Carry a per-batch choice into the next batch."""
+        if enabled == self.config.fast_mode:
+            return
+        self.config.fast_mode = enabled
+        with contextlib.suppress(OSError):
+            self.config.save()
 
     def _queue_jobs(self, jobs: list[SyncJob], verb: str) -> None:
         added = self.queue.add(jobs)

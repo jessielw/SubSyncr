@@ -69,6 +69,7 @@ class AddJobDialog(QDialog):
         options: SyncOptions,
         *,
         output_suffix: str = ".synced",
+        fast_mode: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -86,6 +87,17 @@ class AddJobDialog(QDialog):
         self.overwrite.toggled.connect(self._overwrite_toggled)
         self.replace = QCheckBox("Allow replacing an existing output", self)
         self.replace.setChecked(options.replace_output)
+        self.fast_mode = QCheckBox(
+            "Fast mode - sample the audio instead of reading the whole file", self
+        )
+        self.fast_mode.setChecked(fast_mode)
+        self.fast_mode.setToolTip(
+            "Extracts a handful of short segments spread across the reference "
+            "rather than decoding it end to end. On a long film that is "
+            "dramatically faster for the same answer; on a short episode there "
+            "is little to save. Segment count and intro/outro skipping live in "
+            "Settings, under Alignment."
+        )
         self.hint = QLabel(self)
         self.hint.setWordWrap(True)
 
@@ -103,6 +115,7 @@ class AddJobDialog(QDialog):
         form.addRow("Output", self.output)
         form.addRow("", self.overwrite)
         form.addRow("", self.replace)
+        form.addRow("", self.fast_mode)
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
@@ -164,4 +177,5 @@ class AddJobDialog(QDialog):
             job.output_path = Path(self.output.text().strip())
         job.options.overwrite_input = self.overwrite.isChecked()
         job.options.replace_output = self.replace.isChecked()
+        job.options.multi_segment_sync = self.fast_mode.isChecked()
         return job

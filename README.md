@@ -23,6 +23,7 @@ fills, so the interesting part here is the **matching and review**, not the sync
 - **The full ffsubsync option surface** — VAD backend, piecewise `--split-penalty`
   alignment, segment sampling, reference stream selection, and the quality gate.
 - **Speech reuse between sessions**, so a language added later skips extraction.
+- **Fast mode** for long references: sample segments instead of decoding in full.
 - **A headless CLI** over the same core, for scripted batches.
 
 ## Requirements
@@ -45,6 +46,7 @@ uv run ffsubsyncui doctor     # report paths, ffmpeg status and versions
 uv run ffsubsyncui match  D:\media\Season01              # propose pairings only
 uv run ffsubsyncui match  D:\media\Season01 --json
 uv run ffsubsyncui batch  D:\media\Season01 --auto-match 90 --workers 2
+uv run ffsubsyncui batch  D:\movies --fast                  # sample, do not read in full
 uv run ffsubsyncui sync   episode.mkv episode.en.srt
 uv run ffsubsyncui history --limit 20
 ```
@@ -104,6 +106,21 @@ arrays are tiny — 8 videos came to 12 KB.
 
 Concurrency defaults to half the logical cores, capped at four. Raise or lower it
 in Settings; on a spinning disk fewer parallel reads may well be faster.
+
+### Fast mode
+
+Fast mode is `--multi-segment-sync`: ffsubsync samples a handful of short
+segments spread across the reference rather than decoding it end to end. On a
+40-minute reference that measured 2.57 s to 1.40 s for the same answer
+(-2.96 s vs -2.97 s). It is a per-batch toggle in the match dialog, and `--fast`
+on the CLI, because it pays off on long films and saves little on a short episode.
+
+Two neighbouring ffsubsync options are deliberately **not** wired up:
+
+- `--max-duration-seconds` truncates the reference, and returned a confidently
+  wrong `-11.67 s` where the correct offset was `-2.96 s`.
+- `--skip-intro-outro` moved the answer to `+7.28 s` in testing. It only avoids
+  sampling ~90 seconds of a multi-hour file, so the risk is not worth the saving.
 
 ### Two ffsubsync results that look like success
 

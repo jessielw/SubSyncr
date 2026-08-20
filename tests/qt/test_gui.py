@@ -279,3 +279,20 @@ def test_no_estimate_before_enough_samples(window: MainWindow) -> None:
 
     window._batch_started = None
     assert window._estimate_remaining(QueueCounts(ready=5)) == ""
+
+
+def test_fast_mode_applies_to_the_batch_only(
+    qtbot, media_tree: Callable[..., Path], window: MainWindow
+) -> None:
+    """A per-batch choice must not quietly rewrite the saved settings."""
+    folder = media_tree(["Show.S01E01.mkv", "Show.S01E01.en.srt"])
+    dialog = BatchMatchDialog(window.config.sync, parent=window)
+    qtbot.addWidget(dialog)
+    dialog.video_folder.set_text(str(folder))
+    dialog._scan()
+
+    assert dialog.jobs()[0].options.multi_segment_sync is False
+    dialog.fast_mode.setChecked(True)
+    assert dialog.jobs()[0].options.multi_segment_sync is True
+    # The shared settings object is untouched.
+    assert window.config.sync.multi_segment_sync is False
