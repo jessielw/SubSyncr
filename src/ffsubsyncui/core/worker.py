@@ -56,11 +56,23 @@ def claim_stdout() -> TextIO:
     Anything else that writes to stdout - a stray print, ffsubsync writing
     subtitles to ``sys.stdout.fileno()`` when ``-o`` is missing - is rerouted to
     stderr so it can never corrupt the protocol.
+
+    The parent always supplies real pipes, but a windowed frozen build leaves
+    ``sys.stdout``/``sys.stderr`` as ``None``, which breaks any library that
+    writes to them (ffsubsync installs a Rich handler on stderr at import).
+    Both are rebound to the descriptors we know are valid.
     """
     saved_fd = os.dup(1)
     os.dup2(2, 1)
-    sys.stdout = sys.stderr
-    return os.fdopen(saved_fd, "w", encoding="utf-8", buffering=1)
+    try:
+        diagnostics: TextIO = os.fdopen(
+            2, "w", encoding="utf-8", errors="replace", buffering=1, closefd=False
+        )
+    except OSError:
+        diagnostics = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+    sys.stdout = diagnostics
+    sys.stderr = diagnostics
+    return os.fdopen(saved_fd, "w", encoding="utf-8", errors="replace", buffering=1)
 
 
 class _ResultScraper(logging.Handler):

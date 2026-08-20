@@ -17,6 +17,13 @@ from ffsubsyncui.core.models import JobStatus, SyncJob, SyncResult
 from ffsubsyncui.core.speech_cache import SpeechCache
 from ffsubsyncui.core.store import JobStore
 
+_STAGE_BY_STATUS = {
+    JobStatus.SUCCEEDED: "Complete",
+    JobStatus.FAILED: "Failed",
+    JobStatus.CANCELLED: "Cancelled",
+    JobStatus.SKIPPED_LOW_QUALITY: "Left unmodified",
+}
+
 
 @dataclass
 class QueueCallbacks:
@@ -82,6 +89,11 @@ class SyncQueue:
     @property
     def callbacks(self) -> QueueCallbacks:
         return self._callbacks
+
+    @callbacks.setter
+    def callbacks(self, value: QueueCallbacks) -> None:
+        """Swap observers wholesale; used to detach a closing window."""
+        self._callbacks = value
 
     def snapshot(self) -> list[SyncJob]:
         with self._lock:
@@ -279,7 +291,7 @@ class SyncQueue:
                 job.result = result
                 job.status = result.status
                 job.progress = 1.0 if result.success else None
-                job.stage = result.status.value.replace("_", " ").title()
+                job.stage = _STAGE_BY_STATUS.get(result.status, "Finished")
                 job.last_error = result.error
                 self._processes.pop(job.id, None)
                 self._active_count -= 1

@@ -7,16 +7,28 @@ from PyInstaller.utils.hooks import collect_all
 root = Path(SPECPATH).parent
 ffsubsync_datas, ffsubsync_binaries, ffsubsync_hiddenimports = collect_all("ffsubsync")
 
+hiddenimports = [
+    *ffsubsync_hiddenimports,
+    # These three are imported lazily inside ffsubsyncui.__main__ so that the
+    # sync worker never pays to load Qt. Name them explicitly rather than rely
+    # on PyInstaller following imports that sit inside a function body.
+    "ffsubsyncui.core.worker",
+    "ffsubsyncui.cli.main",
+    "ffsubsyncui.qt.app",
+]
+
 a = Analysis(
     [str(root / "src" / "ffsubsyncui" / "__main__.py")],
     pathex=[str(root / "src")],
     binaries=ffsubsync_binaries,
     datas=ffsubsync_datas,
-    hiddenimports=ffsubsync_hiddenimports,
+    hiddenimports=hiddenimports,
     hookspath=[str(root / "packaging" / "hooks")],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["torch"],
+    # ffsubsync only needs torch for the silero and fused VAD backends, which
+    # we do not expose. Bundling it would add hundreds of megabytes.
+    excludes=["torch", "tkinter"],
     noarchive=False,
     optimize=0,
 )

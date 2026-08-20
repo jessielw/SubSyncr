@@ -129,6 +129,10 @@ def parse_subtitle_tags(path: Path | str) -> SubtitleTags:
     region: str | None = None
     forced = False
     sdh = False
+    # "hi" is both Hindi and a hearing-impaired marker. Tags are peeled
+    # right-to-left, so when we meet it we cannot yet know whether a real
+    # language follows further left. Defer the decision until the walk ends.
+    pending_hi = False
 
     for _ in range(_MAX_TAGS):
         match = _TRAILING_TOKEN.search(stem)
@@ -140,10 +144,8 @@ def parse_subtitle_tags(path: Path | str) -> SubtitleTags:
             forced = True
         elif base in _SDH_TOKENS:
             sdh = True
-        elif base == "hi" and language is not None:
-            # "hi" is Hindi, but once a language is already claimed a second
-            # "hi" is far more likely to mean hearing-impaired.
-            sdh = True
+        elif base == "hi" and language is None and not pending_hi:
+            pending_hi = True
         elif base in _LANGUAGES and language is None:
             language = _LANGUAGES[base]
             region = token_region if token_region in _REGIONS else None
@@ -154,6 +156,13 @@ def parse_subtitle_tags(path: Path | str) -> SubtitleTags:
             break
 
         stem = stem[: match.start()]
+
+    if pending_hi:
+        # A language to its left means the "hi" was the marker, not Hindi.
+        if language is None:
+            language = "hi"
+        else:
+            sdh = True
 
     if language is not None and region is not None:
         language = f"{language}-{region}"

@@ -210,7 +210,10 @@ class JobStore:
         parameters.append(limit)
         with self._lock:
             rows = self._connection.execute(
-                f"SELECT * FROM history{where} ORDER BY finished_at DESC LIMIT ?",
+                # rowid breaks ties: two jobs can finish within one clock
+                # tick, and arbitrary ordering there looks like a bug.
+                f"SELECT * FROM history{where}"
+                " ORDER BY finished_at DESC, rowid DESC LIMIT ?",
                 parameters,
             ).fetchall()
         return [_history_from_row(row) for row in rows]
@@ -222,7 +225,8 @@ class JobStore:
         with self._lock:
             cursor = self._connection.execute(
                 "DELETE FROM history WHERE id NOT IN ("
-                " SELECT id FROM history ORDER BY finished_at DESC LIMIT ?)",
+                " SELECT id FROM history ORDER BY finished_at DESC, rowid DESC"
+                " LIMIT ?)",
                 (keep,),
             )
             self._connection.commit()
