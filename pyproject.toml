@@ -9,12 +9,13 @@ authors = [
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "ffsubsync>=0.5.1,<0.6",
+    "platformdirs>=4.3,<5",
     "pyside6-essentials>=6.8,<7",
     "rapidfuzz>=3.14,<4",
 ]
 
 [project.scripts]
-ffsubsyncui = "ffsubsyncui.app:main"
+ffsubsyncui = "ffsubsyncui.__main__:main"
 
 [dependency-groups]
 dev = [
@@ -54,6 +55,9 @@ typeCheckingMode = "standard"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["-v", "--tb=short", "--timeout=60"]
+addopts = ["-v", "--tb=short", "--timeout=120"]
 timeout_method = "thread"
+markers = [
+    "slow: exercises a real ffsubsync subprocess",
+]
 
