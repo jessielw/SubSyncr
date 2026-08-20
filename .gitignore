@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.basedpyright/
+.coverage
+htmlcov/
+
+# Environments and build output
+.venv/
+build/
+dist/
+wheels/
+*.spec.bak
+
+# Editors and platforms
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
