@@ -85,6 +85,10 @@ class AddJobDialog(QDialog):
         self.output.textEdited.connect(self._mark_output_edited)
         self.overwrite = QCheckBox("Write over the input subtitle", self)
         self.overwrite.toggled.connect(self._overwrite_toggled)
+        self.backup = QCheckBox("Keep a .bak copy of the original", self)
+        self.backup.setChecked(options.backup_before_overwrite)
+        self.backup.setEnabled(False)
+        self.overwrite.toggled.connect(self.backup.setEnabled)
         self.replace = QCheckBox("Allow replacing an existing output", self)
         self.replace.setChecked(options.replace_output)
         self.fast_mode = QCheckBox(
@@ -114,6 +118,7 @@ class AddJobDialog(QDialog):
         form.addRow("Subtitle", self.subtitle)
         form.addRow("Output", self.output)
         form.addRow("", self.overwrite)
+        form.addRow("", self.backup)
         form.addRow("", self.replace)
         form.addRow("", self.fast_mode)
 
@@ -176,6 +181,7 @@ class AddJobDialog(QDialog):
         if self.output.text().strip():
             job.output_path = Path(self.output.text().strip())
         job.options.overwrite_input = self.overwrite.isChecked()
+        job.options.backup_before_overwrite = self.backup.isChecked()
         job.options.replace_output = self.replace.isChecked()
         job.options.multi_segment_sync = self.fast_mode.isChecked()
         return job

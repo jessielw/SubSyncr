@@ -88,6 +88,20 @@ def scan_subtitles(folder: Path, *, recursive: bool = True) -> list[Path]:
     return scan_folder(folder, SUBTITLE_EXTENSIONS, recursive=recursive)
 
 
+def scan_references(
+    folder: Path, *, subtitles_as_reference: bool = False, recursive: bool = True
+) -> list[Path]:
+    """Files usable as a sync reference.
+
+    A subtitle reference needs no ffmpeg at all, which makes aligning one
+    subtitle against a known-good one close to instant.
+    """
+    extensions = (
+        SUBTITLE_REFERENCE_EXTENSIONS if subtitles_as_reference else MEDIA_EXTENSIONS
+    )
+    return scan_folder(folder, extensions, recursive=recursive)
+
+
 def needs_ffmpeg(reference: Path) -> bool:
     """Whether syncing against this reference has to decode audio.
 

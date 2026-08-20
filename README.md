@@ -24,6 +24,12 @@ fills, so the interesting part here is the **matching and review**, not the sync
   alignment, segment sampling, reference stream selection, and the quality gate.
 - **Speech reuse between sessions**, so a language added later skips extraction.
 - **Fast mode** for long references: sample segments instead of decoding in full.
+- **Subtitle-to-subtitle alignment.** Align against a known-good subtitle
+  instead of audio: no ffmpeg, and four episodes in well under a second.
+- **Drag and drop.** Drop folders or files on the window to open a pre-filled
+  review.
+- **A backup before any in-place overwrite**, and an existing `.bak` is never
+  replaced, so re-running cannot bury the true original.
 - **A headless CLI** over the same core, for scripted batches.
 
 ## Requirements
@@ -47,6 +53,7 @@ uv run ffsubsyncui match  D:\media\Season01              # propose pairings only
 uv run ffsubsyncui match  D:\media\Season01 --json
 uv run ffsubsyncui batch  D:\media\Season01 --auto-match 90 --workers 2
 uv run ffsubsyncui batch  D:\movies --fast                  # sample, do not read in full
+uv run ffsubsyncui batch  D:\good-subs D:ad-subs --subs-as-reference
 uv run ffsubsyncui sync   episode.mkv episode.en.srt
 uv run ffsubsyncui history --limit 20
 ```

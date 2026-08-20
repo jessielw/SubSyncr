@@ -113,6 +113,9 @@ class SyncOptions:
     output_encoding: str = "utf-8"
     overwrite_input: bool = False
     replace_output: bool = False
+    # Only meaningful with overwrite_input: keep a copy of the untouched
+    # subtitle before ffsubsync writes over it.
+    backup_before_overwrite: bool = True
     apply_offset_seconds: float = 0.0
     # Environment
     ffmpeg_path: str = ""
@@ -158,6 +161,9 @@ class SyncOptions:
             output_encoding=_as_str(value.get("output_encoding"), d.output_encoding),
             overwrite_input=_as_bool(value.get("overwrite_input"), d.overwrite_input),
             replace_output=_as_bool(value.get("replace_output"), d.replace_output),
+            backup_before_overwrite=_as_bool(
+                value.get("backup_before_overwrite"), d.backup_before_overwrite
+            ),
             apply_offset_seconds=_as_float(
                 value.get("apply_offset_seconds"), d.apply_offset_seconds
             ),

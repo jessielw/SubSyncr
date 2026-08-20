@@ -140,3 +140,16 @@ def test_recursive_scan_finds_nested_files(media_tree: Tree) -> None:
     media_tree(["Show.S01E01.en.srt"], subfolder="subs")
     plan = propose_matches(scan_media(root), scan_subtitles(root))
     assert plan.matched
+
+
+def test_subtitle_references_can_be_scanned(media_tree: Tree) -> None:
+    """Aligning against a known-good subtitle needs no ffmpeg at all."""
+    from ffsubsyncui.core.scanner import scan_references
+
+    folder = media_tree(["Show.S01E01.mkv", "Show.S01E01.en.srt", "Show.S01E01.es.srt"])
+    assert [p.name for p in scan_references(folder)] == ["Show.S01E01.mkv"]
+    as_subtitles = scan_references(folder, subtitles_as_reference=True)
+    assert {p.name for p in as_subtitles} == {
+        "Show.S01E01.en.srt",
+        "Show.S01E01.es.srt",
+    }

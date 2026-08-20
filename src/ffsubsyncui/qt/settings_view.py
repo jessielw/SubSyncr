@@ -277,6 +277,14 @@ class SettingsDialog(QDialog):
         )
         self.replace_output = QCheckBox("Allow replacing an existing output file", page)
         self.replace_output.setChecked(options.replace_output)
+        self.backup_before_overwrite = QCheckBox(
+            "Keep a .bak copy before overwriting a subtitle in place", page
+        )
+        self.backup_before_overwrite.setChecked(options.backup_before_overwrite)
+        self.backup_before_overwrite.setToolTip(
+            "Only applies when a job writes over its input. An existing .bak is "
+            "never replaced, so re-running cannot bury the true original."
+        )
 
         self.ffmpeg_path = QLineEdit(options.ffmpeg_path, page)
         self.ffmpeg_path.setPlaceholderText("leave empty to use PATH")
@@ -295,6 +303,7 @@ class SettingsDialog(QDialog):
         form.addRow("Output encoding", self.output_encoding)
         form.addRow("Extra offset", self.apply_offset)
         form.addRow("", self.replace_output)
+        form.addRow("", self.backup_before_overwrite)
         form.addRow("ffmpeg folder", ffmpeg_row)
         form.addRow("", self._ffmpeg_status)
         return page
@@ -351,6 +360,7 @@ class SettingsDialog(QDialog):
             encoding=self.encoding.currentText().strip() or "infer",
             output_encoding=self.output_encoding.currentText().strip() or "utf-8",
             replace_output=self.replace_output.isChecked(),
+            backup_before_overwrite=self.backup_before_overwrite.isChecked(),
             apply_offset_seconds=self.apply_offset.value(),
             ffmpeg_path=self.ffmpeg_path.text().strip(),
         )

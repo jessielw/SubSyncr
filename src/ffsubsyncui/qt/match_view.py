@@ -36,7 +36,7 @@ from ffsubsyncui.core.language import parse_subtitle_tags
 from ffsubsyncui.core.matcher import DEFAULT_THRESHOLD, propose_matches
 from ffsubsyncui.core.models import MatchMethod, SyncJob, SyncOptions
 from ffsubsyncui.core.planner import build_job, group_key_for
-from ffsubsyncui.core.scanner import scan_media, scan_subtitles
+from ffsubsyncui.core.scanner import scan_references, scan_subtitles
 
 SUBTITLE_FILTER = "Subtitle files (*.srt *.ass *.ssa *.sub *.vtt);;All files (*)"
 
@@ -119,8 +119,17 @@ class BatchMatchDialog(QDialog):
         self.subtitle_folder.set_text(subtitle_folder)
         self.recursive = QCheckBox("Include subfolders", self)
         self.recursive.setChecked(recursive)
+        self.subtitle_reference = QCheckBox("References are subtitles, not video", self)
+        self.subtitle_reference.setToolTip(
+            "Align subtitles against a known-good subtitle instead of against "
+            "audio. This needs no ffmpeg and takes about a tenth of a second "
+            "per file."
+        )
         self.fast_mode = QCheckBox(
             "Fast mode - sample the audio instead of reading the whole file", self
+        )
+        self.subtitle_reference.toggled.connect(
+            lambda on: self.fast_mode.setEnabled(not on)
         )
         self.fast_mode.setChecked(fast_mode)
         self.fast_mode.setToolTip(
@@ -145,6 +154,7 @@ class BatchMatchDialog(QDialog):
         form.addRow("Video folder", self.video_folder)
         form.addRow("Subtitle folder", self.subtitle_folder)
         form.addRow("", self.recursive)
+        form.addRow("", self.subtitle_reference)
         form.addRow("", self.fast_mode)
         form.addRow("Similarity threshold", self.threshold)
         source_box = QGroupBox("Source", self)
@@ -225,13 +235,25 @@ class BatchMatchDialog(QDialog):
             return
 
         recursive = self.recursive.isChecked()
-        videos = scan_media(video_dir, recursive=recursive)
+        subtitle_reference = self.subtitle_reference.isChecked()
+        videos = scan_references(
+            video_dir, subtitles_as_reference=subtitle_reference, recursive=recursive
+        )
         subtitles = scan_subtitles(subtitle_dir, recursive=recursive)
         if not videos:
-            QMessageBox.information(self, "Scan", "No video files found.")
+            kind = "subtitle" if subtitle_reference else "video"
+            QMessageBox.information(self, "Scan", f"No {kind} references found.")
             return
+        self.load_files(videos, subtitles)
 
-        plan = propose_matches(videos, subtitles, threshold=self.threshold.value())
+    def load_files(self, references: list[Path], subtitles: list[Path]) -> None:
+        """Populate the review grid from an explicit set of files."""
+        # A file cannot be its own reference, which is easy to hit when the
+        # references are subtitles from the same folder.
+        chosen = set(references)
+        subtitles = [path for path in subtitles if path not in chosen]
+
+        plan = propose_matches(references, subtitles, threshold=self.threshold.value())
         self._rows = [
             _Row(
                 video=match.video,
@@ -384,10 +406,9 @@ class BatchMatchDialog(QDialog):
     def jobs(self) -> list[SyncJob]:
         # Fast mode is a per-batch decision, so it is applied here rather than
         # written back into the saved settings.
+        fast = self.fast_mode.isChecked() and not self.subtitle_reference.isChecked()
         options = (
-            replace(self._options, multi_segment_sync=True)
-            if (self.fast_mode.isChecked())
-            else self._options
+            replace(self._options, multi_segment_sync=True) if fast else self._options
         )
         keys: dict[Path, str] = {}
         jobs: list[SyncJob] = []

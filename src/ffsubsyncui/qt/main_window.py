@@ -4,10 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import contextlib
+from pathlib import Path
 import time
 
 from PySide6.QtCore import QByteArray, QSettings, QSize, Qt, Slot
-from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QDragEnterEvent,
+    QDragMoveEvent,
+    QDropEvent,
+)
 from PySide6.QtWidgets import (
     QDialog,
     QLabel,
@@ -24,6 +31,7 @@ from ffsubsyncui.core.config import AppConfig, database_path, speech_cache_dir
 from ffsubsyncui.core.ffmpeg import probe
 from ffsubsyncui.core.models import JobStatus, SyncJob
 from ffsubsyncui.core.queue import QueueCounts, SyncQueue
+from ffsubsyncui.core.scanner import MEDIA_EXTENSIONS, SUBTITLE_EXTENSIONS
 from ffsubsyncui.core.speech_cache import SpeechCache
 from ffsubsyncui.core.store import JobStore
 from ffsubsyncui.qt.add_job import AddJobDialog
@@ -59,6 +67,7 @@ class MainWindow(QMainWindow):
         self.bridge = QueueBridge(self.queue, self)
 
         self.setWindowTitle("FFSubSync UI")
+        self.setAcceptDrops(True)
         self.setMinimumSize(960, 600)
         self.resize(1240, 760)
 
@@ -197,20 +206,83 @@ class MainWindow(QMainWindow):
         self._update_status()
         self._update_actions()
 
+    # -- drag and drop ---------------------------------------------------
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        paths = [
+            Path(url.toLocalFile())
+            for url in event.mimeData().urls()
+            if url.isLocalFile()
+        ]
+        if not paths:
+            return
+        event.acceptProposedAction()
+        folders = [path for path in paths if path.is_dir()]
+        files = [path for path in paths if path.is_file()]
+        if folders:
+            self._match_folders(
+                video_folder=str(folders[0]),
+                subtitle_folder=str(folders[1]) if len(folders) > 1 else "",
+            )
+        elif files:
+            self._match_dropped_files(files)
+
+    def _match_dropped_files(self, files: list[Path]) -> None:
+        """Review an explicit set of dropped files rather than a folder scan."""
+        media = [path for path in files if path.suffix.casefold() in MEDIA_EXTENSIONS]
+        subtitles = [
+            path for path in files if path.suffix.casefold() in SUBTITLE_EXTENSIONS
+        ]
+        if not media:
+            # A flat pile of subtitles cannot say which of them is the
+            # known-good one, so there is nothing to guess at here.
+            QMessageBox.information(
+                self,
+                "Drop files",
+                "Drop the video files as well. To align subtitles against a "
+                "reference subtitle, use Match folders and tick "
+                "'References are subtitles, not video'.",
+            )
+            return
+        if not subtitles:
+            QMessageBox.information(
+                self, "Drop files", "No subtitle files were dropped."
+            )
+            return
+        dialog = self._build_match_dialog(
+            video_folder=str(media[0].parent),
+            subtitle_folder=str(subtitles[0].parent),
+        )
+        dialog.load_files(media, subtitles)
+        self._run_match_dialog(dialog)
+
     # -- toolbar slots ---------------------------------------------------
 
-    @Slot()
-    def _match_folders(self) -> None:
-        dialog = BatchMatchDialog(
+    def _build_match_dialog(
+        self, *, video_folder: str = "", subtitle_folder: str = ""
+    ) -> BatchMatchDialog:
+        return BatchMatchDialog(
             self.config.sync,
             threshold=self.config.match_threshold,
             recursive=self.config.recursive_scan,
             fast_mode=self.config.fast_mode,
             output_suffix=self.config.output_suffix,
-            video_folder=str(self.settings.value("match/videoFolder", "")),
-            subtitle_folder=str(self.settings.value("match/subtitleFolder", "")),
+            video_folder=video_folder
+            or str(self.settings.value("match/videoFolder", "")),
+            subtitle_folder=subtitle_folder
+            or str(self.settings.value("match/subtitleFolder", "")),
             parent=self,
         )
+
+    def _run_match_dialog(self, dialog: BatchMatchDialog) -> None:
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
         # Remember the folders either way, so a cancelled scan is not retyped.
         self.settings.setValue("match/videoFolder", dialog.video_folder.text())
@@ -218,6 +290,17 @@ class MainWindow(QMainWindow):
         self._remember_fast_mode(dialog.fast_mode.isChecked())
         if accepted:
             self._queue_jobs(dialog.jobs(), "Queued")
+
+    @Slot()
+    def _match_folders(
+        self, *, video_folder: str = "", subtitle_folder: str = ""
+    ) -> None:
+        dialog = self._build_match_dialog(
+            video_folder=video_folder, subtitle_folder=subtitle_folder
+        )
+        if video_folder:
+            dialog._scan()
+        self._run_match_dialog(dialog)
 
     @Slot()
     def _add_job(self) -> None:

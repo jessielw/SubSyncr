@@ -296,3 +296,59 @@ def test_fast_mode_applies_to_the_batch_only(
     assert dialog.jobs()[0].options.multi_segment_sync is True
     # The shared settings object is untouched.
     assert window.config.sync.multi_segment_sync is False
+
+
+def test_dropping_files_opens_a_prefilled_review(
+    qtbot, media_tree: Callable[..., Path], window: MainWindow, monkeypatch
+) -> None:
+    """Dropped files should land in the review grid, not a folder scan."""
+    folder = media_tree(["Show.S01E01.mkv", "Show.S01E01.en.srt", "Show.S01E01.es.srt"])
+    captured: list[BatchMatchDialog] = []
+    monkeypatch.setattr(
+        MainWindow, "_run_match_dialog", lambda self, dialog: captured.append(dialog)
+    )
+    window._match_dropped_files(sorted(folder.iterdir()))
+
+    assert captured, "a review dialog should have been built"
+    dialog = captured[0]
+    qtbot.addWidget(dialog)
+    assert dialog.table.rowCount() == 2
+    assert dialog.subtitle_reference.isChecked() is False
+    assert {job.reference_path.name for job in dialog.jobs()} == {"Show.S01E01.mkv"}
+
+
+def test_dropping_subtitles_without_a_video_explains_itself(
+    media_tree: Callable[..., Path], window: MainWindow, monkeypatch
+) -> None:
+    """Which of several subtitles is the reference is not knowable."""
+    folder = media_tree(["Show.S01E01.en.srt", "Show.S01E01.es.srt"])
+    shown: list[str] = []
+    monkeypatch.setattr(
+        "ffsubsyncui.qt.main_window.QMessageBox.information",
+        lambda *args, **kwargs: shown.append(args[2]),
+    )
+    monkeypatch.setattr(
+        MainWindow, "_run_match_dialog", lambda self, dialog: pytest.fail("no dialog")
+    )
+    window._match_dropped_files(sorted(folder.iterdir()))
+    assert shown and "video" in shown[0]
+
+
+def test_subtitle_reference_mode_disables_fast_mode(qtbot, window: MainWindow) -> None:
+    """Sampling audio makes no sense when the reference is a text file."""
+    dialog = BatchMatchDialog(window.config.sync, parent=window)
+    qtbot.addWidget(dialog)
+    assert dialog.fast_mode.isEnabled() is True
+    dialog.subtitle_reference.setChecked(True)
+    assert dialog.fast_mode.isEnabled() is False
+
+
+def test_backup_checkbox_follows_overwrite(qtbot, window: MainWindow) -> None:
+    from ffsubsyncui.qt.add_job import AddJobDialog
+
+    dialog = AddJobDialog(window.config.sync, parent=window)
+    qtbot.addWidget(dialog)
+    assert dialog.backup.isEnabled() is False
+    dialog.overwrite.setChecked(True)
+    assert dialog.backup.isEnabled() is True
+    assert dialog.backup.isChecked() is True

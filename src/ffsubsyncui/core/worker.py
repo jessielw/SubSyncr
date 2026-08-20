@@ -26,6 +26,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import time
 from typing import Any, TextIO
@@ -192,6 +193,22 @@ def build_arguments(spec: dict[str, Any], item: dict[str, Any]) -> list[str]:
     return arguments
 
 
+def backup_original(subtitle: Path) -> Path | None:
+    """Copy a subtitle aside before it is overwritten in place.
+
+    An existing backup is never replaced: a second run would otherwise bury the
+    true original under the already-synced version.
+    """
+    target = subtitle.with_suffix(subtitle.suffix + ".bak")
+    if target.exists():
+        return target
+    try:
+        shutil.copy2(subtitle, target)
+    except OSError:
+        return None
+    return target
+
+
 def _classify(synced: bool, output: Path, scraper: _ResultScraper) -> tuple[str, str]:
     """Turn ffsubsync's ambiguous signals into one status and a message."""
     if scraper.low_quality_reasons:
@@ -294,6 +311,21 @@ def run_group(spec: dict[str, Any], channel: EventChannel) -> int:
                 "progress", job_id=str(item["id"]), fraction=None, stage="Aligning"
             )
             try:
+                if overwrite and options.get("backup_before_overwrite", True):
+                    if (saved := backup_original(subtitle)) is not None:
+                        channel.emit(
+                            "log",
+                            job_id=str(item["id"]),
+                            level="INFO",
+                            message=f"kept the original at {saved.name}",
+                        )
+                    else:
+                        channel.emit(
+                            "log",
+                            job_id=str(item["id"]),
+                            level="WARNING",
+                            message="could not write a backup; overwriting anyway",
+                        )
                 args.srtin = [str(subtitle)]
                 args.srtout = None if overwrite else str(output)
                 result: dict[str, Any] = {}

@@ -203,3 +203,48 @@ def test_overwrite_input_writes_in_place(
     assert result.status is JobStatus.SUCCEEDED
     assert subtitle.read_text(encoding="utf-8") != before
     assert not default_output_for(subtitle).exists()
+
+
+def test_overwrite_keeps_a_backup_of_the_original(
+    make_pair: Callable[[float], tuple[Path, Path]],
+) -> None:
+    reference, subtitle = make_pair(5.0)
+    original = subtitle.read_text(encoding="utf-8")
+    job = _job(reference, subtitle, overwrite_input=True)
+    assert _run_one(job).status is JobStatus.SUCCEEDED
+
+    backup = subtitle.with_suffix(subtitle.suffix + ".bak")
+    assert backup.is_file()
+    assert backup.read_text(encoding="utf-8") == original
+    assert subtitle.read_text(encoding="utf-8") != original
+
+
+def test_a_second_overwrite_does_not_bury_the_true_original(
+    make_pair: Callable[[float], tuple[Path, Path]],
+) -> None:
+    """Otherwise re-running would replace the backup with synced content."""
+    reference, subtitle = make_pair(5.0)
+    original = subtitle.read_text(encoding="utf-8")
+    backup = subtitle.with_suffix(subtitle.suffix + ".bak")
+
+    for _ in range(2):
+        job = _job(reference, subtitle, overwrite_input=True)
+        assert _run_one(job).status is JobStatus.SUCCEEDED
+    assert backup.read_text(encoding="utf-8") == original
+
+
+def test_backup_can_be_turned_off(
+    make_pair: Callable[[float], tuple[Path, Path]],
+) -> None:
+    reference, subtitle = make_pair(5.0)
+    job = _job(reference, subtitle, overwrite_input=True, backup_before_overwrite=False)
+    assert _run_one(job).status is JobStatus.SUCCEEDED
+    assert not subtitle.with_suffix(subtitle.suffix + ".bak").exists()
+
+
+def test_no_backup_when_not_overwriting(
+    make_pair: Callable[[float], tuple[Path, Path]],
+) -> None:
+    reference, subtitle = make_pair(5.0)
+    assert _run_one(_job(reference, subtitle)).status is JobStatus.SUCCEEDED
+    assert not subtitle.with_suffix(subtitle.suffix + ".bak").exists()

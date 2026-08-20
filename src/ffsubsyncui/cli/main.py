@@ -20,7 +20,7 @@ from ffsubsyncui.core.matcher import DEFAULT_THRESHOLD, propose_matches
 from ffsubsyncui.core.models import JobStatus, SyncJob, SyncOptions, default_output_for
 from ffsubsyncui.core.planner import build_job, jobs_from_matches
 from ffsubsyncui.core.queue import QueueCallbacks, SyncQueue
-from ffsubsyncui.core.scanner import scan_media, scan_subtitles
+from ffsubsyncui.core.scanner import scan_references, scan_subtitles
 from ffsubsyncui.core.speech_cache import SpeechCache
 from ffsubsyncui.core.store import JobStore
 
@@ -47,12 +47,20 @@ def _resolve_folders(video_dir: Path, subtitle_dir: Path | None) -> tuple[Path, 
 
 
 def _collect(
-    video_dir: Path, subtitle_dir: Path, *, recursive: bool
+    video_dir: Path,
+    subtitle_dir: Path,
+    *,
+    recursive: bool,
+    subtitles_as_reference: bool = False,
 ) -> tuple[list[Path], list[Path]]:
-    return (
-        scan_media(video_dir, recursive=recursive),
-        scan_subtitles(subtitle_dir, recursive=recursive),
+    references = scan_references(
+        video_dir, subtitles_as_reference=subtitles_as_reference, recursive=recursive
     )
+    subtitles = scan_subtitles(subtitle_dir, recursive=recursive)
+    # A file can never be its own reference, which is easy to hit when both
+    # sides are subtitles in the same tree.
+    chosen = set(references)
+    return references, [path for path in subtitles if path not in chosen]
 
 
 # -- commands ------------------------------------------------------------
@@ -68,7 +76,10 @@ def command_match(args: argparse.Namespace) -> int:
         return 2
 
     videos, subtitles = _collect(
-        video_dir, subtitle_dir, recursive=not args.no_recursive
+        video_dir,
+        subtitle_dir,
+        recursive=not args.no_recursive,
+        subtitles_as_reference=args.subs_as_reference,
     )
     plan = propose_matches(videos, subtitles, threshold=args.threshold)
 
@@ -98,7 +109,8 @@ def command_match(args: argparse.Namespace) -> int:
         )
         return 0
 
-    _echo(f"{len(videos)} video files, {len(subtitles)} subtitle files")
+    kind = "subtitle references" if args.subs_as_reference else "video files"
+    _echo(f"{len(videos)} {kind}, {len(subtitles)} subtitle files")
     _echo()
     for match in plan.matches:
         subtitle = match.subtitle.name if match.subtitle else "(no match)"
@@ -212,7 +224,10 @@ def command_batch(args: argparse.Namespace) -> int:
         return 2
 
     videos, subtitles = _collect(
-        video_dir, subtitle_dir, recursive=not args.no_recursive
+        video_dir,
+        subtitle_dir,
+        recursive=not args.no_recursive,
+        subtitles_as_reference=args.subs_as_reference,
     )
     plan = propose_matches(videos, subtitles, threshold=args.threshold)
     jobs = jobs_from_matches(
@@ -353,6 +368,12 @@ def build_parser() -> argparse.ArgumentParser:
         target.add_argument("video_dir", type=Path)
         target.add_argument("subtitle_dir", type=Path, nargs="?", default=None)
         target.add_argument("--no-recursive", action="store_true")
+        target.add_argument(
+            "--subs-as-reference",
+            action="store_true",
+            help="treat the reference folder as subtitles rather than video; "
+            "needs no ffmpeg and is far faster",
+        )
         target.add_argument(
             "--threshold",
             type=float,
