@@ -16,13 +16,13 @@ fills, so the interesting part here is the **matching and review**, not the sync
   names, then RapidFuzz similarity. Every proposal shows its method, its
   confidence, and why — including a warning when the runner-up was close.
 - **One video, many subtitles.** `ep.en.srt`, `ep.es.srt` and `ep.en.forced.srt`
-  all pair with the same video instead of competing for it.
-- **Speech reuse.** The first subtitle for a video serializes its speech array;
-  the rest skip audio extraction entirely and finish in about a second.
-- **A real queue.** Configurable concurrency, per-job cancellation, retry,
+  all pair with the same video instead of competing for it, and all sync from a
+  single audio extraction.
+- **A real queue.** Parallel by default, per-job cancellation, retry,
   crash-recoverable pending work, and searchable history with offsets and scores.
 - **The full ffsubsync option surface** — VAD backend, piecewise `--split-penalty`
   alignment, segment sampling, reference stream selection, and the quality gate.
+- **Speech reuse between sessions**, so a language added later skips extraction.
 - **A headless CLI** over the same core, for scripted batches.
 
 ## Requirements
@@ -64,16 +64,46 @@ Nothing under `core/` or `cli/` may import PySide6, and `tests/test_boundary.py`
 enforces that rather than trusting it. The CLI exists partly to keep the boundary
 honest: anything it cannot reach is logic that leaked into the GUI.
 
-### Why each sync runs in its own process
+### Why syncs run in their own process
 
 `ffsubsync` calls `logging.basicConfig()` at import and reconfigures the root
-logger, keeps a process-global logger, and offers no cancellation hook. In-process
-that means no Stop button and interleaved logs the moment concurrency exceeds one.
-A subprocess per job fixes all three, and makes the alignment score — which
-ffsubsync only logs and never returns — cleanly recoverable.
+logger, and offers no cancellation hook. A subprocess fixes both, makes the
+alignment score — which ffsubsync only logs and never returns — cleanly
+recoverable, and returns every byte the sync allocated the moment it exits
+(measured: ~104 MB peak, 0 MB after).
 
 The child speaks newline-delimited JSON on stdout and takes exclusive ownership of
 that descriptor, so nothing a dependency prints can corrupt the channel.
+
+### Why the unit of work is a video, not a subtitle
+
+Extracting speech from the reference dominates the cost; aligning a parsed
+subtitle against an already-extracted reference is almost free. So one worker
+process handles a whole *group* — one video and every subtitle queued against it
+— building the reference pipeline once with `make_reference_pipe` and reusing it
+across `try_sync` calls.
+
+Measured on 24 jobs across 8 videos, cold cache:
+
+| | 1 worker | 2 workers | 4 workers |
+|---|---|---|---|
+| one process per subtitle | 11.95 s | 7.03 s | 4.30 s |
+| one process per video | **5.79 s** | **3.04 s** | **1.66 s** |
+
+Two effects compound: 8 process startups instead of 24 (~0.37 s each from source,
+more when frozen), and 8 audio extractions instead of 24. A sibling subtitle costs
+about 0.03 s instead of 0.45 s.
+
+This also removes a scheduling problem rather than solving it. When siblings were
+separate jobs, one had to build the shared speech array while the others either
+stalled or duplicated the work. Owning the group makes that race impossible.
+
+The on-disk speech cache still earns its place, but only *across* runs: sync
+English today and Spanish next week and the second run skips the audio pass. The
+arrays are tiny — 8 videos came to 12 KB.
+
+Concurrency defaults to half the logical cores, capped at four. Raise or lower it
+in Settings; on a spinning disk fewer parallel reads may well be faster.
 
 ### Two ffsubsync results that look like success
 

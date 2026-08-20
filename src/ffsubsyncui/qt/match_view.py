@@ -101,6 +101,8 @@ class BatchMatchDialog(QDialog):
         threshold: float = DEFAULT_THRESHOLD,
         recursive: bool = True,
         output_suffix: str = ".synced",
+        video_folder: str = "",
+        subtitle_folder: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -111,7 +113,9 @@ class BatchMatchDialog(QDialog):
         self._rows: list[_Row] = []
 
         self.video_folder = PathField(self)
+        self.video_folder.set_text(video_folder)
         self.subtitle_folder = PathField(self)
+        self.subtitle_folder.set_text(subtitle_folder)
         self.recursive = QCheckBox("Include subfolders", self)
         self.recursive.setChecked(recursive)
         self.threshold = QDoubleSpinBox(self)

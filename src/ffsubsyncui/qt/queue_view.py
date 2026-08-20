@@ -171,7 +171,9 @@ class JobTableModel(QAbstractTableModel):
                 if job.result is not None:
                     if job.result.score is not None:
                         parts.append(f"alignment score {job.result.score:.1f}")
-                    if job.result.used_speech_cache:
+                    if job.result.shared_extraction:
+                        parts.append("reused a sibling's extraction")
+                    elif job.result.used_speech_cache:
                         parts.append("reused cached speech")
                     if job.result.duration_seconds:
                         parts.append(f"took {job.result.duration_seconds:.1f}s")
@@ -219,7 +221,9 @@ def _result_text(job: SyncJob) -> str:
             and abs(result.framerate_scale_factor - 1.0) > 0.0005
         ):
             pieces.append(f"rate x{result.framerate_scale_factor:.4f}")
-        if result.used_speech_cache:
+        if result.shared_extraction:
+            pieces.append("shared")
+        elif result.used_speech_cache:
             pieces.append("cached")
         return ", ".join(pieces) if pieces else "Complete"
     if job.status is JobStatus.SKIPPED_LOW_QUALITY:

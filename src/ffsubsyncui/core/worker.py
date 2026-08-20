@@ -1,17 +1,22 @@
-"""Child process that runs exactly one ffsubsync job.
+"""Child process that syncs one reference against one or more subtitles.
 
 Run as ``python -m ffsubsyncui.core.worker``, or as ``<frozen exe> --sync-worker``
-when packaged. Reads a JSON job spec on stdin and writes newline-delimited JSON
-events on stdout.
+when packaged. Reads a JSON job-group spec on stdin and writes newline-delimited
+JSON events on stdout.
 
 Isolating ffsubsync in its own process buys three things that are impossible
 in-process:
 
 * **Cancellation.** ffsubsync exposes no cancel hook, but a process can be killed.
-* **Clean logs at concurrency > 1.** The ``ffsubsync`` logger is process-global,
-  so in-process jobs would interleave each other's output.
+* **Memory.** Everything a sync allocated is returned to the OS when it exits.
 * **Root logger safety.** ``import ffsubsync`` calls ``logging.basicConfig()``,
   which would otherwise reconfigure the host application's logging.
+
+A *group* is one reference plus every subtitle that syncs against it, usually
+the language variants of one episode. Extracting speech from the reference is by
+far the most expensive step, so the whole group shares a single extraction held
+in memory - about fifteen times faster per sibling than paying process startup
+and a serialized speech array for each one.
 """
 
 from __future__ import annotations
@@ -76,11 +81,19 @@ def claim_stdout() -> TextIO:
 
 
 class _ResultScraper(logging.Handler):
-    """Forward ffsubsync log records and mine them for hidden results."""
+    """Forward ffsubsync log records and mine them for hidden results.
+
+    ``item_id`` tags every record with whichever subtitle is being synced, so a
+    group's shared extraction and its per-subtitle work stay distinguishable.
+    """
 
     def __init__(self, channel: EventChannel) -> None:
         super().__init__(logging.INFO)
         self._channel = channel
+        self.item_id: str | None = None
+        self.reset()
+
+    def reset(self) -> None:
         self.score: float | None = None
         self.offset_seconds: float | None = None
         self.framerate_scale_factor: float | None = None
@@ -101,21 +114,27 @@ class _ResultScraper(logging.Handler):
             self.low_quality_reasons = [
                 reason.strip() for reason in match[1].split(";") if reason.strip()
             ]
-        self._channel.emit("log", level=record.levelname, message=message)
+        self._channel.emit(
+            "log", job_id=self.item_id, level=record.levelname, message=message
+        )
 
 
-def build_arguments(spec: dict[str, Any]) -> list[str]:
-    """Translate a job spec into an ffsubsync argv."""
+def build_arguments(spec: dict[str, Any], item: dict[str, Any]) -> list[str]:
+    """Translate a group spec plus one of its subtitles into an ffsubsync argv.
+
+    Only the first item builds the namespace; the rest are swapped in afterwards
+    by rebinding ``srtin``/``srtout``.
+    """
     options: dict[str, Any] = spec.get("options") or {}
     reference = str(spec["reference"])
-    arguments = [reference, "-i", str(spec["subtitle"])]
+    arguments = [reference, "-i", str(item["subtitle"])]
 
     if options.get("overwrite_input"):
         arguments.append("--overwrite-input")
     else:
         # Always explicit. With no -o, ffsubsync writes subtitle bytes straight
         # to stdout, and validate_args calls sys.stdin.isatty() when -i is absent.
-        arguments.extend(("-o", str(spec["output"])))
+        arguments.extend(("-o", str(item["output"])))
 
     arguments.extend(("--encoding", str(options.get("encoding", "infer"))))
     arguments.extend(
@@ -170,30 +189,63 @@ def build_arguments(spec: dict[str, Any]) -> list[str]:
             )
         )
 
-    if spec.get("serialize_speech"):
-        arguments.append("--serialize-speech")
-
     return arguments
 
 
-def run_job(spec: dict[str, Any], channel: EventChannel) -> int:
-    """Execute one sync. Returns a process exit code."""
+def _classify(synced: bool, output: Path, scraper: _ResultScraper) -> tuple[str, str]:
+    """Turn ffsubsync's ambiguous signals into one status and a message."""
+    if scraper.low_quality_reasons:
+        # ffsubsync wrote the *original* subtitles to the output path, so the
+        # file existing proves nothing here.
+        return "skipped_low_quality", "; ".join(scraper.low_quality_reasons)
+    if synced and output.is_file():
+        return "succeeded", ""
+    if synced:
+        return "failed", f"ffsubsync reported success but wrote no output to {output}"
+    return "failed", "ffsubsync could not align these files"
+
+
+def run_group(spec: dict[str, Any], channel: EventChannel) -> int:
+    """Sync every subtitle in the group against one shared extraction."""
     # Imported here so claim_stdout() runs first and the basicConfig side effect
     # of this import lands in a process we own.
-    import ffsubsync
-    from ffsubsync.ffsubsync import make_parser
+    from ffsubsync.ffsubsync import (
+        make_parser,
+        make_reference_pipe,
+        try_sync,
+        validate_and_transform_args,
+    )
+    import numpy as np
 
-    started = time.monotonic()
+    items: list[dict[str, Any]] = list(spec.get("items") or [])
+    if not items:
+        return 0
+    options: dict[str, Any] = spec.get("options") or {}
+    overwrite = bool(options.get("overwrite_input"))
+
     scraper = _ResultScraper(channel)
     logger = logging.getLogger("ffsubsync")
     logger.addHandler(scraper)
 
-    overwrite = bool((spec.get("options") or {}).get("overwrite_input"))
-    expected_output = Path(str(spec["subtitle"] if overwrite else spec["output"]))
+    def fail_all(message: str) -> None:
+        for item in items:
+            channel.emit(
+                "result",
+                job_id=item["id"],
+                status="failed",
+                return_code=1,
+                error=message,
+                duration_seconds=0.0,
+            )
 
     try:
-        arguments = build_arguments(spec)
-        channel.emit("started", pid=os.getpid(), argv=arguments)
+        arguments = build_arguments(spec, items[0])
+        channel.emit("started", pid=os.getpid(), argv=arguments, items=len(items))
+
+        args = validate_and_transform_args(make_parser().parse_args(arguments))
+        if args is None:
+            fail_all("ffsubsync rejected these arguments")
+            return 1
 
         last_fraction = -1.0
 
@@ -205,71 +257,84 @@ def run_job(spec: dict[str, Any], channel: EventChannel) -> int:
                 return  # Don't flood the pipe with sub-percent updates.
             if fraction is not None:
                 last_fraction = fraction
-            stage = (
-                "Aligning"
-                if fraction is not None and fraction >= 0.999
-                else "Extracting speech"
+            channel.emit(
+                "progress", job_id=None, fraction=fraction, stage="Extracting speech"
             )
-            channel.emit("progress", fraction=fraction, stage=stage)
 
-        namespace = make_parser().parse_args(arguments)
-        raw_result: Any = ffsubsync.run(namespace, on_progress)
-        result = raw_result if isinstance(raw_result, dict) else {}
+        # The expensive step, paid once for the whole group.
+        extraction_started = time.monotonic()
+        reference_pipe = make_reference_pipe(args, progress_handler=on_progress)
+        reference_pipe.fit(args.reference)
+        extraction_seconds = time.monotonic() - extraction_started
+        channel.emit("extracted", seconds=extraction_seconds)
 
-        return_code = int(result.get("retval", 1) or 0)
-        # retval stays 0 even when the alignment fails, so it is never
-        # sufficient on its own.
-        reported_success = bool(result.get("sync_was_successful", False))
-        output_exists = expected_output.is_file()
-
-        if scraper.low_quality_reasons:
-            # ffsubsync wrote the *original* subtitles to the output path, so
-            # the file existing proves nothing here.
-            status = "skipped_low_quality"
-            error = "; ".join(scraper.low_quality_reasons)
-        elif return_code == 0 and reported_success and output_exists:
-            status = "succeeded"
-            error = ""
-        else:
-            status = "failed"
-            if not output_exists and return_code == 0 and reported_success:
-                error = (
-                    "ffsubsync reported success but wrote no output to "
-                    f"{expected_output}"
+        if spec.get("serialize_speech"):
+            # ffsubsync only ever writes this beside the reference; the parent
+            # moves it into the cache directory afterwards.
+            try:
+                np.savez_compressed(
+                    os.path.splitext(args.reference)[0] + ".npz",
+                    speech=reference_pipe.transform(args.reference),
                 )
-            elif return_code != 0:
-                error = f"ffsubsync exited with code {return_code}"
-            else:
-                error = "ffsubsync could not align these files"
+            except Exception as exc:
+                channel.emit(
+                    "log",
+                    job_id=None,
+                    level="WARNING",
+                    message=f"could not cache speech: {exc}",
+                )
 
-        channel.emit(
-            "result",
-            status=status,
-            return_code=return_code,
-            offset_seconds=(
-                _as_float(result.get("offset_seconds"))
-                if result.get("offset_seconds") is not None
-                else scraper.offset_seconds
-            ),
-            framerate_scale_factor=(
-                _as_float(result.get("framerate_scale_factor"))
-                if result.get("framerate_scale_factor") is not None
-                else scraper.framerate_scale_factor
-            ),
-            score=scraper.score,
-            quality_reasons=scraper.low_quality_reasons,
-            error=error,
-            duration_seconds=time.monotonic() - started,
-        )
+        for index, item in enumerate(items):
+            started = time.monotonic()
+            scraper.reset()
+            scraper.item_id = str(item["id"])
+            subtitle = Path(str(item["subtitle"]))
+            output = subtitle if overwrite else Path(str(item["output"]))
+            channel.emit(
+                "progress", job_id=str(item["id"]), fraction=None, stage="Aligning"
+            )
+            try:
+                args.srtin = [str(subtitle)]
+                args.srtout = None if overwrite else str(output)
+                result: dict[str, Any] = {}
+                synced = bool(try_sync(args, reference_pipe, result))
+                status, error = _classify(synced, output, scraper)
+                channel.emit(
+                    "result",
+                    job_id=str(item["id"]),
+                    status=status,
+                    return_code=0,
+                    offset_seconds=(
+                        _as_float(result.get("offset_seconds"))
+                        if result.get("offset_seconds") is not None
+                        else scraper.offset_seconds
+                    ),
+                    framerate_scale_factor=(
+                        _as_float(result.get("framerate_scale_factor"))
+                        if result.get("framerate_scale_factor") is not None
+                        else scraper.framerate_scale_factor
+                    ),
+                    score=scraper.score,
+                    quality_reasons=scraper.low_quality_reasons,
+                    error=error,
+                    # Only the first subtitle is charged for the shared
+                    # extraction; the rest genuinely cost what they cost.
+                    duration_seconds=(time.monotonic() - started)
+                    + (extraction_seconds if index == 0 else 0.0),
+                    shared_extraction=index > 0,
+                )
+            except Exception as exc:
+                channel.emit(
+                    "result",
+                    job_id=str(item["id"]),
+                    status="failed",
+                    return_code=1,
+                    error=str(exc) or type(exc).__name__,
+                    duration_seconds=time.monotonic() - started,
+                )
         return 0
     except Exception as exc:
-        channel.emit(
-            "result",
-            status="failed",
-            return_code=1,
-            error=str(exc) or type(exc).__name__,
-            duration_seconds=time.monotonic() - started,
-        )
+        fail_all(str(exc) or type(exc).__name__)
         return 1
     finally:
         logger.removeHandler(scraper)
@@ -286,16 +351,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         spec = json.loads(sys.stdin.read())
     except (json.JSONDecodeError, OSError) as exc:
-        channel.emit(
-            "result", status="failed", return_code=2, error=f"Bad job spec: {exc}"
-        )
+        channel.emit("fatal", error=f"Bad job spec: {exc}")
         return 2
     if not isinstance(spec, dict):
-        channel.emit(
-            "result", status="failed", return_code=2, error="Job spec must be an object"
-        )
+        channel.emit("fatal", error="Job spec must be an object")
         return 2
-    return run_job(spec, channel)
+    return run_group(spec, channel)
 
 
 if __name__ == "__main__":

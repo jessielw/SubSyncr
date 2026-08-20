@@ -1,5 +1,9 @@
 """The job queue: a thread pool of cancellable ffsubsync subprocesses.
 
+Work is claimed a *group* at a time - one reference and every subtitle that
+syncs against it - so the expensive speech extraction is paid once per video
+rather than once per subtitle.
+
 Callbacks fire on worker threads, never on a UI thread. Frontends are
 responsible for marshalling them (see ``ffsubsyncui.qt.bridge``).
 """
@@ -9,11 +13,13 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 import contextlib
 from dataclasses import dataclass
+import json
 import threading
 
 from ffsubsyncui.core.config import AppConfig
 from ffsubsyncui.core.engine import EngineError, SyncProcess, build_spec, validate
 from ffsubsyncui.core.models import JobStatus, SyncJob, SyncResult
+from ffsubsyncui.core.scanner import needs_ffmpeg
 from ffsubsyncui.core.speech_cache import SpeechCache
 from ffsubsyncui.core.store import JobStore
 
@@ -57,6 +63,23 @@ class QueueCounts:
             + self.skipped
         )
 
+    @property
+    def finished(self) -> int:
+        return self.succeeded + self.failed + self.cancelled + self.skipped
+
+
+def _batch_key(job: SyncJob) -> str:
+    """Jobs sharing this key can share one worker process and one extraction.
+
+    The reference and every option that shapes the run must match, since the
+    group is executed from a single ffsubsync namespace.
+    """
+    if not job.group_key:
+        # No group means run alone; the job id keeps it unique.
+        return f"solo:{job.id}"
+    options = json.dumps(job.options.to_dict(), sort_keys=True)
+    return f"{job.group_key}|{job.reference_path}|{options}"
+
 
 class SyncQueue:
     def __init__(
@@ -78,6 +101,7 @@ class SyncQueue:
 
         self._lock = threading.RLock()
         self._jobs: list[SyncJob] = store.load_jobs() if persist_queue else []
+        # Every job in a running group maps to that group's single process.
         self._processes: dict[str, SyncProcess] = {}
         self._workers: list[threading.Thread] = []
         self._active_count = 0
@@ -128,6 +152,11 @@ class SyncQueue:
                     case JobStatus.SKIPPED_LOW_QUALITY:
                         counts.skipped += 1
         return counts
+
+    def pending_groups(self) -> int:
+        """How many distinct worker processes the remaining work needs."""
+        with self._lock:
+            return len({_batch_key(job) for job in self._runnable()})
 
     # -- mutation --------------------------------------------------------
 
@@ -209,14 +238,19 @@ class SyncQueue:
         self._ensure_workers()
 
     def stop(self) -> None:
-        """Stop after the current jobs; do not start anything new."""
+        """Stop after the current groups; do not start anything new."""
         with self._lock:
             self._draining = False
         if not self.is_running:
             self._emit_running(False)
 
     def cancel(self, job_id: str) -> bool:
-        """Kill one running job."""
+        """Kill the worker running this job.
+
+        Siblings sharing the job's process stop too: they are one ffsubsync run
+        over one shared extraction and cannot be separated. Whatever already
+        finished keeps its result; the rest are reported as cancelled.
+        """
         with self._lock:
             process = self._processes.get(job_id)
         if process is None:
@@ -227,7 +261,7 @@ class SyncQueue:
     def cancel_all(self) -> int:
         with self._lock:
             self._draining = False
-            processes = list(self._processes.values())
+            processes = list(dict.fromkeys(self._processes.values()))
         for process in processes:
             process.cancel()
         return len(processes)
@@ -248,7 +282,9 @@ class SyncQueue:
     def _ensure_workers(self) -> None:
         with self._lock:
             self._workers = [worker for worker in self._workers if worker.is_alive()]
-            wanted = max(1, min(self._config.concurrency, len(self._runnable())))
+            # One thread per pending group, capped by the concurrency setting.
+            groups = len({_batch_key(job) for job in self._runnable()})
+            wanted = max(1, min(self._config.concurrency, groups))
             missing = wanted - len(self._workers)
             for _ in range(max(0, missing)):
                 worker = threading.Thread(
@@ -262,44 +298,59 @@ class SyncQueue:
             job for job in self._jobs if job.enabled and job.status is JobStatus.QUEUED
         ]
 
-    def _claim(self) -> SyncJob | None:
+    def _claim_group(self) -> list[SyncJob]:
+        """Take every runnable job that shares the next group's key."""
         with self._lock:
             if not self._draining or self._shutdown:
-                return None
-            job = next(iter(self._runnable()), None)
-            if job is None:
-                return None
-            job.status = JobStatus.RUNNING
-            job.stage = "Starting"
-            job.progress = None
-            job.last_error = ""
+                return []
+            runnable = self._runnable()
+            if not runnable:
+                return []
+            key = _batch_key(runnable[0])
+            group = [job for job in runnable if _batch_key(job) == key]
+            for job in group:
+                job.status = JobStatus.RUNNING
+                job.stage = "Starting"
+                job.progress = None
+                job.last_error = ""
             self._active_count += 1
             was_idle = self._active_count == 1
             self._persist()
         if was_idle:
             self._emit_running(True)
-        self._emit_job_changed(job)
-        return job
+        for job in group:
+            self._emit_job_changed(job)
+        return group
 
     def _worker_loop(self) -> None:
         while True:
-            job = self._claim()
-            if job is None:
+            group = self._claim_group()
+            if not group:
                 break
-            result = self._execute(job)
+            results = self._execute(group)
             with self._lock:
-                job.result = result
-                job.status = result.status
-                job.progress = 1.0 if result.success else None
-                job.stage = _STAGE_BY_STATUS.get(result.status, "Finished")
-                job.last_error = result.error
-                self._processes.pop(job.id, None)
+                for job in group:
+                    result = results.get(
+                        job.id,
+                        SyncResult(
+                            status=JobStatus.FAILED,
+                            return_code=1,
+                            error="the sync worker reported no result for this job",
+                        ),
+                    )
+                    job.result = result
+                    job.status = result.status
+                    job.progress = 1.0 if result.success else None
+                    job.stage = _STAGE_BY_STATUS.get(result.status, "Finished")
+                    job.last_error = result.error
+                    self._processes.pop(job.id, None)
                 self._active_count -= 1
                 idle = self._active_count == 0
                 self._persist()
-            with contextlib.suppress(Exception):
-                self._store.record(job, result)
-            self._emit_job_changed(job)
+            for job in group:
+                with contextlib.suppress(Exception):
+                    self._store.record(job, job.result or SyncResult(job.status))
+                self._emit_job_changed(job)
             self._notify_queue_changed()
             if idle:
                 # Another worker may still pick something up; only report idle
@@ -309,51 +360,72 @@ class SyncQueue:
                 if finished:
                     self._emit_running(False)
 
-    def _execute(self, job: SyncJob) -> SyncResult:
-        try:
-            validate(job)
-        except EngineError as exc:
-            return SyncResult(status=JobStatus.FAILED, return_code=1, error=str(exc))
+    def _execute(self, group: list[SyncJob]) -> dict[str, SyncResult]:
+        # Validation is per job: one bad subtitle should not sink its siblings.
+        runnable: list[SyncJob] = []
+        results: dict[str, SyncResult] = {}
+        for job in group:
+            try:
+                validate(job)
+            except EngineError as exc:
+                results[job.id] = SyncResult(
+                    status=JobStatus.FAILED, return_code=1, error=str(exc)
+                )
+            else:
+                runnable.append(job)
+        if not runnable:
+            return results
 
+        first = runnable[0]
         reference_override = None
         serialize = False
         used_cache = False
-        group_key = job.group_key
+        producer_key = ""
 
-        if self._config.speech_cache_enabled and group_key:
-            hit = self._cache.lookup(job.reference_path, job.options)
+        # A subtitle or .npz reference has no expensive extraction to cache.
+        if self._config.speech_cache_enabled and needs_ffmpeg(first.reference_path):
+            hit = self._cache.lookup(first.reference_path, first.options)
             if hit is not None:
                 reference_override = hit
                 used_cache = True
-            elif self._cache.claim_producer(group_key):
-                serialize = True
+            else:
+                # Only one process may write the sidecar for a given reference.
+                producer_key = str(
+                    self._cache.cached_path(first.reference_path, first.options)
+                )
+                serialize = self._cache.claim_producer(producer_key)
 
         process = SyncProcess(
             build_spec(
-                job,
+                runnable,
                 reference_override=reference_override,
                 serialize_speech=serialize,
             )
         )
         with self._lock:
-            self._processes[job.id] = process
+            for job in runnable:
+                self._processes[job.id] = process
 
         try:
-            result = process.run(
-                on_progress=lambda fraction, stage: self._emit_progress(
-                    job.id, fraction, stage
+            produced = process.run(
+                on_progress=lambda job_id, fraction, stage: self._emit_progress(
+                    job_id, fraction, stage, runnable
                 ),
-                on_log=lambda level, message: self._emit_log(job.id, level, message),
+                on_log=lambda job_id, level, message: self._emit_log(
+                    job_id, level, message, runnable
+                ),
             )
         finally:
-            if serialize and group_key:
+            if serialize and producer_key:
                 # Harvest even on failure so no stray .npz is left beside media.
                 with contextlib.suppress(Exception):
-                    self._cache.harvest(job.reference_path, job.options)
-                self._cache.release_producer(group_key)
+                    self._cache.harvest(first.reference_path, first.options)
+                self._cache.release_producer(producer_key)
 
-        result.used_speech_cache = used_cache
-        return result
+        for job_id, result in produced.items():
+            result.used_speech_cache = used_cache
+            results[job_id] = result
+        return results
 
     def _persist(self) -> None:
         if not self._persist_queue:
@@ -366,20 +438,34 @@ class SyncQueue:
             with contextlib.suppress(Exception):
                 self._callbacks.job_changed(job)
 
-    def _emit_progress(self, job_id: str, fraction: float | None, stage: str) -> None:
+    def _emit_progress(
+        self,
+        job_id: str | None,
+        fraction: float | None,
+        stage: str,
+        group: list[SyncJob],
+    ) -> None:
+        # A group-wide event (the shared extraction) applies to every member.
+        targets = [job.id for job in group] if job_id is None else [job_id]
         with self._lock:
-            job = next((item for item in self._jobs if item.id == job_id), None)
-            if job is not None:
-                job.progress = fraction
-                job.stage = stage
+            for job in self._jobs:
+                if job.id in targets and job.status is JobStatus.RUNNING:
+                    job.progress = fraction
+                    job.stage = stage
         if self._callbacks.progress is not None:
-            with contextlib.suppress(Exception):
-                self._callbacks.progress(job_id, fraction, stage)
+            for target in targets:
+                with contextlib.suppress(Exception):
+                    self._callbacks.progress(target, fraction, stage)
 
-    def _emit_log(self, job_id: str, level: str, message: str) -> None:
-        if self._callbacks.log is not None:
-            with contextlib.suppress(Exception):
-                self._callbacks.log(job_id, level, message)
+    def _emit_log(
+        self, job_id: str | None, level: str, message: str, group: list[SyncJob]
+    ) -> None:
+        if self._callbacks.log is None:
+            return
+        # Attribute group-wide lines to the job that is paying for them.
+        target = job_id if job_id is not None else group[0].id
+        with contextlib.suppress(Exception):
+            self._callbacks.log(target, level, message)
 
     def _emit_running(self, running: bool) -> None:
         if self._callbacks.running_changed is not None:

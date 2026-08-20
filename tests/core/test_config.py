@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from ffsubsyncui.core.config import MAX_CONCURRENCY, AppConfig
+from ffsubsyncui.core.config import (
+    MAX_CONCURRENCY,
+    AppConfig,
+    default_concurrency,
+)
 from ffsubsyncui.core.models import SyncOptions
 
 
@@ -27,14 +31,16 @@ def test_round_trip(tmp_path: Path) -> None:
 
 
 def test_missing_file_yields_defaults(tmp_path: Path) -> None:
-    assert AppConfig.load(tmp_path / "absent.json").concurrency == 1
+    loaded = AppConfig.load(tmp_path / "absent.json")
+    assert loaded.concurrency == default_concurrency()
+    assert loaded.auto_start is True
 
 
 def test_corrupt_file_yields_defaults(tmp_path: Path) -> None:
     """A broken config must not stop the application starting."""
     path = tmp_path / "config.json"
     path.write_text("{not json", encoding="utf-8")
-    assert AppConfig.load(path).concurrency == 1
+    assert AppConfig.load(path).concurrency == default_concurrency()
 
 
 @pytest.mark.parametrize(
@@ -43,6 +49,18 @@ def test_corrupt_file_yields_defaults(tmp_path: Path) -> None:
 )
 def test_concurrency_is_clamped(value: int, expected: int) -> None:
     assert AppConfig(concurrency=value).normalized().concurrency == expected
+
+
+def test_default_concurrency_is_sane() -> None:
+    """Derived from the machine, but never outside what the app accepts."""
+    value = default_concurrency()
+    assert 1 <= value <= MAX_CONCURRENCY
+
+
+def test_auto_start_round_trips(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    AppConfig(auto_start=False).save(path)
+    assert AppConfig.load(path).auto_start is False
 
 
 def test_threshold_is_clamped() -> None:

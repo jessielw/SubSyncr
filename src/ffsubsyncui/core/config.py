@@ -25,6 +25,17 @@ APP_AUTHOR = "FFSubSyncUI"
 # extractions just thrashes the disk.
 MAX_CONCURRENCY = 8
 
+
+def default_concurrency() -> int:
+    """A concurrency that helps on a workstation without thrashing a disk.
+
+    Speech extraction is mostly a serial read of the reference plus an ffmpeg
+    audio decode, so it scales well up to a point. Half the logical cores,
+    capped at four, keeps headroom for whatever else is encoding.
+    """
+    return min(4, max(1, (os.cpu_count() or 2) // 2))
+
+
 _ENV_DATA_DIR = "FFSUBSYNCUI_DATA_DIR"
 
 
@@ -69,12 +80,14 @@ class AppConfig:
     """Everything the user can change that is not a one-off job detail."""
 
     sync: SyncOptions = field(default_factory=SyncOptions)
-    concurrency: int = 1
+    concurrency: int = field(default_factory=default_concurrency)
     match_threshold: float = 75.0
     recursive_scan: bool = True
     output_suffix: str = ".synced"
     speech_cache_enabled: bool = True
     history_limit: int = 2000
+    # Start draining as soon as work is queued, rather than waiting for a click.
+    auto_start: bool = True
 
     def normalized(self) -> Self:
         """Clamp values a hand-edited config file could put out of range."""
@@ -97,6 +110,7 @@ class AppConfig:
             "output_suffix": self.output_suffix,
             "speech_cache_enabled": self.speech_cache_enabled,
             "history_limit": self.history_limit,
+            "auto_start": self.auto_start,
         }
 
     @classmethod
@@ -116,6 +130,7 @@ class AppConfig:
                 value.get("speech_cache_enabled", default.speech_cache_enabled)
             ),
             history_limit=_int(value.get("history_limit"), default.history_limit),
+            auto_start=bool(value.get("auto_start", default.auto_start)),
         )
         return config.normalized()
 

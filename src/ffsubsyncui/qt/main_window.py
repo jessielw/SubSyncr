@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import time
 
 from PySide6.QtCore import QByteArray, QSettings, QSize, Qt, Slot
 from PySide6.QtGui import QAction, QCloseEvent
@@ -20,8 +21,8 @@ from PySide6.QtWidgets import (
 
 from ffsubsyncui.core.config import AppConfig, database_path, speech_cache_dir
 from ffsubsyncui.core.ffmpeg import probe
-from ffsubsyncui.core.models import JobStatus
-from ffsubsyncui.core.queue import SyncQueue
+from ffsubsyncui.core.models import JobStatus, SyncJob
+from ffsubsyncui.core.queue import QueueCounts, SyncQueue
 from ffsubsyncui.core.speech_cache import SpeechCache
 from ffsubsyncui.core.store import JobStore
 from ffsubsyncui.qt.add_job import AddJobDialog
@@ -32,6 +33,9 @@ from ffsubsyncui.qt.queue_view import COLUMN_PROGRESS, JobTableModel, JobTableVi
 from ffsubsyncui.qt.settings_view import SettingsDialog
 
 _MAX_LOG_BLOCKS = 5000
+
+# Don't guess at a rate until a couple of jobs have actually finished.
+_MIN_SAMPLES_FOR_ETA = 2
 
 
 class MainWindow(QMainWindow):
@@ -77,6 +81,10 @@ class MainWindow(QMainWindow):
         self.ffmpeg_label = QLabel(self)
         self.statusBar().addWidget(self.queue_label, 1)
         self.statusBar().addPermanentWidget(self.ffmpeg_label)
+
+        # Batch timing, for the estimate in the status bar.
+        self._batch_started: float | None = None
+        self._batch_baseline = 0
 
         self._build_toolbar()
         self._connect_bridge()
@@ -180,7 +188,11 @@ class MainWindow(QMainWindow):
 
     @Slot(bool)
     def _running_changed(self, running: bool) -> None:
-        del running
+        if running and self._batch_started is None:
+            self._batch_started = time.monotonic()
+            self._batch_baseline = self.queue.counts().finished
+        elif not running:
+            self._batch_started = None
         self._update_status()
         self._update_actions()
 
@@ -193,11 +205,16 @@ class MainWindow(QMainWindow):
             threshold=self.config.match_threshold,
             recursive=self.config.recursive_scan,
             output_suffix=self.config.output_suffix,
+            video_folder=str(self.settings.value("match/videoFolder", "")),
+            subtitle_folder=str(self.settings.value("match/subtitleFolder", "")),
             parent=self,
         )
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            added = self.queue.add(dialog.jobs())
-            self.statusBar().showMessage(f"Queued {added} jobs", 5000)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        # Remember the folders either way, so a cancelled scan is not retyped.
+        self.settings.setValue("match/videoFolder", dialog.video_folder.text())
+        self.settings.setValue("match/subtitleFolder", dialog.subtitle_folder.text())
+        if accepted:
+            self._queue_jobs(dialog.jobs(), "Queued")
 
     @Slot()
     def _add_job(self) -> None:
@@ -205,7 +222,18 @@ class MainWindow(QMainWindow):
             self.config.sync, output_suffix=self.config.output_suffix, parent=self
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.queue.add([dialog.job()])
+            self._queue_jobs([dialog.job()], "Queued")
+
+    def _queue_jobs(self, jobs: list[SyncJob], verb: str) -> None:
+        added = self.queue.add(jobs)
+        if not added:
+            return
+        groups = self.queue.pending_groups()
+        detail = f"{verb} {added} jobs across {groups} videos"
+        if self.config.auto_start:
+            self.queue.start()
+            detail += " - running"
+        self.statusBar().showMessage(detail, 6000)
 
     def _selected_ids(self) -> list[str]:
         return [job.id for job in self.model.jobs_for_rows(self.table.selected_rows())]
@@ -241,8 +269,7 @@ class MainWindow(QMainWindow):
     def _show_history(self) -> None:
         dialog = HistoryDialog(self.store, self.config.history_limit, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            added = self.queue.add(dialog.jobs())
-            self.statusBar().showMessage(f"Requeued {added} jobs", 5000)
+            self._queue_jobs(dialog.jobs(), "Requeued")
 
     @Slot()
     def _show_settings(self) -> None:
@@ -259,6 +286,7 @@ class MainWindow(QMainWindow):
         self.config.output_suffix = updated.output_suffix
         self.config.speech_cache_enabled = updated.speech_cache_enabled
         self.config.history_limit = updated.history_limit
+        self.config.auto_start = updated.auto_start
         self.cache.enabled = updated.speech_cache_enabled
         try:
             self.config.save()
@@ -294,7 +322,23 @@ class MainWindow(QMainWindow):
             parts.append(f"{counts.skipped} low quality")
         if counts.cancelled:
             parts.append(f"{counts.cancelled} cancelled")
+        if remaining := self._estimate_remaining(counts):
+            parts.append(remaining)
         self.queue_label.setText("   -   ".join(parts))
+
+    def _estimate_remaining(self, counts: QueueCounts) -> str:
+        """A rough time-left figure, from how fast this batch is actually going."""
+        if self._batch_started is None:
+            return ""
+        completed = counts.finished - self._batch_baseline
+        outstanding = counts.ready + counts.running
+        if completed < _MIN_SAMPLES_FOR_ETA or not outstanding:
+            return ""
+        elapsed = time.monotonic() - self._batch_started
+        seconds = (elapsed / completed) * outstanding
+        if seconds < 90:
+            return f"~{seconds:.0f}s left"
+        return f"~{seconds / 60:.0f} min left"
 
     def _update_ffmpeg_status(self) -> None:
         status = probe(self.config.sync.ffmpeg_path)

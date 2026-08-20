@@ -141,7 +141,9 @@ def _run_jobs(jobs: list[SyncJob], config: AppConfig, *, verbose: bool) -> int:
         detail = ""
         if job.result and job.result.offset_seconds is not None:
             detail = f"  offset {job.result.offset_seconds:+.3f}s"
-            if job.result.used_speech_cache:
+            if job.result.shared_extraction:
+                detail += " (shared extraction)"
+            elif job.result.used_speech_cache:
                 detail += " (cached speech)"
         _echo(f"[{label}] {job.subtitle_path.name}{detail}")
         if job.last_error:

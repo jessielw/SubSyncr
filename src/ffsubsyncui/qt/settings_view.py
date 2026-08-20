@@ -96,8 +96,10 @@ class SettingsDialog(QDialog):
         self.concurrency.setRange(1, MAX_CONCURRENCY)
         self.concurrency.setValue(config.concurrency)
         self.concurrency.setToolTip(
-            "Jobs to run at once. Each is a separate process, so logs stay "
-            "attributed and any one of them can be cancelled independently."
+            "Videos to process at once. Each is a separate process, so memory "
+            "is returned as soon as it finishes and any one can be cancelled. "
+            "All the subtitles for one video share a single process, and a "
+            "single audio extraction."
         )
         self.match_threshold = QDoubleSpinBox(page)
         self.match_threshold.setRange(0.0, 100.0)
@@ -105,6 +107,8 @@ class SettingsDialog(QDialog):
         self.match_threshold.setValue(config.match_threshold)
         self.recursive_scan = QCheckBox("Scan subfolders by default", page)
         self.recursive_scan.setChecked(config.recursive_scan)
+        self.auto_start = QCheckBox("Start the queue as soon as jobs are added", page)
+        self.auto_start.setChecked(config.auto_start)
         self.output_suffix = QLineEdit(config.output_suffix, page)
         self.output_suffix.setToolTip(
             "Inserted before the extension, so ep.en.srt becomes ep.en.synced.srt."
@@ -113,11 +117,12 @@ class SettingsDialog(QDialog):
         self.history_limit.setRange(0, 100000)
         self.history_limit.setValue(config.history_limit)
 
-        self.speech_cache = QCheckBox("Reuse extracted speech across languages", page)
+        self.speech_cache = QCheckBox("Remember extracted speech between runs", page)
         self.speech_cache.setChecked(config.speech_cache_enabled)
         self.speech_cache.setToolTip(
-            "When one video has several subtitles, extract its audio once and "
-            "reuse it. Later subtitles then sync in about a second."
+            "Subtitles queued together already share one extraction. This keeps "
+            "it on disk as well, so syncing another language for the same video "
+            "in a later session skips the audio pass entirely."
         )
         self._cache_label = QLabel(page)
         clear_cache = QPushButton("Clear cache", page)
@@ -131,6 +136,7 @@ class SettingsDialog(QDialog):
         form.addRow("Concurrent jobs", self.concurrency)
         form.addRow("Default similarity threshold", self.match_threshold)
         form.addRow("", self.recursive_scan)
+        form.addRow("", self.auto_start)
         form.addRow("Output suffix", self.output_suffix)
         form.addRow("History entries to keep", self.history_limit)
         form.addRow("", self.speech_cache)
@@ -356,5 +362,6 @@ class SettingsDialog(QDialog):
             output_suffix=self.output_suffix.text().strip(),
             speech_cache_enabled=self.speech_cache.isChecked(),
             history_limit=self.history_limit.value(),
+            auto_start=self.auto_start.isChecked(),
         )
         return updated.normalized()

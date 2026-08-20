@@ -195,11 +195,19 @@ class SyncResult:
     quality_reasons: list[str] = field(default_factory=list)
     error: str = ""
     duration_seconds: float | None = None
+    # The reference was a speech array cached by an earlier session.
     used_speech_cache: bool = False
+    # A sibling subtitle in the same group paid for the extraction this job
+    # reused, in memory, within one worker process.
+    shared_extraction: bool = False
 
     @property
     def success(self) -> bool:
         return self.status is JobStatus.SUCCEEDED
+
+    @property
+    def skipped_extraction(self) -> bool:
+        return self.used_speech_cache or self.shared_extraction
 
 
 @dataclass(frozen=True, slots=True)

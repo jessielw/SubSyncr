@@ -240,3 +240,42 @@ def test_touch_on_a_missing_job_is_harmless(window: MainWindow) -> None:
 
 def test_queue_is_a_real_sync_queue(window: MainWindow) -> None:
     assert isinstance(window.queue, SyncQueue)
+
+
+def test_auto_start_runs_the_queue_on_add(
+    window: MainWindow, make_job: Callable[..., SyncJob], monkeypatch
+) -> None:
+    """Queueing work should be one action, not two."""
+    started: list[bool] = []
+    monkeypatch.setattr(window.queue, "start", lambda: started.append(True))
+    window.config.auto_start = True
+    window._queue_jobs([make_job("Show.S01E01")], "Queued")
+    assert started == [True]
+
+
+def test_auto_start_off_leaves_the_queue_idle(
+    window: MainWindow, make_job: Callable[..., SyncJob], monkeypatch
+) -> None:
+    started: list[bool] = []
+    monkeypatch.setattr(window.queue, "start", lambda: started.append(True))
+    window.config.auto_start = False
+    window._queue_jobs([make_job("Show.S01E01")], "Queued")
+    assert started == []
+    assert window.model.rowCount() == 1
+
+
+def test_status_bar_reports_group_count_on_add(
+    window: MainWindow, make_job: Callable[..., SyncJob], monkeypatch
+) -> None:
+    monkeypatch.setattr(window.queue, "start", lambda: None)
+    window.config.auto_start = False
+    window._queue_jobs([make_job("A"), make_job("B")], "Queued")
+    assert "2 jobs across 2 videos" in window.statusBar().currentMessage()
+
+
+def test_no_estimate_before_enough_samples(window: MainWindow) -> None:
+    """An ETA from one data point is noise, so none is shown."""
+    from ffsubsyncui.core.queue import QueueCounts
+
+    window._batch_started = None
+    assert window._estimate_remaining(QueueCounts(ready=5)) == ""

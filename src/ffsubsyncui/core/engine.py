@@ -1,9 +1,14 @@
-"""Parent side of the sync subprocess: spawn, stream events, cancel."""
+"""Parent side of the sync subprocess: spawn, stream events, cancel.
+
+The unit of work is a *group*: one reference file and every subtitle that syncs
+against it. One process handles the whole group so the expensive speech
+extraction is paid once and shared in memory.
+"""
 
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 import contextlib
 import json
 import os
@@ -18,8 +23,10 @@ from ffsubsyncui.core.ffmpeg import probe
 from ffsubsyncui.core.models import JobStatus, SyncJob, SyncResult
 from ffsubsyncui.core.scanner import needs_ffmpeg
 
-ProgressCallback = Callable[[float | None, str], None]
-LogCallback = Callable[[str, str], None]
+# job_id (None for group-wide events), fraction, stage
+ProgressCallback = Callable[[str | None, float | None, str], None]
+# job_id (None for group-wide events), level, message
+LogCallback = Callable[[str | None, str, str], None]
 
 # Seconds to wait for a terminated worker to exit before killing it outright.
 _KILL_GRACE = 5.0
@@ -71,25 +78,40 @@ def validate(job: SyncJob) -> None:
 
 
 def build_spec(
-    job: SyncJob,
+    jobs: Sequence[SyncJob],
     *,
     reference_override: Path | None = None,
     serialize_speech: bool = False,
 ) -> dict[str, Any]:
+    """Describe a group of jobs sharing one reference for the worker.
+
+    Every job must name the same reference. Options come from the first, since
+    they are what the shared extraction is configured with.
+    """
+    if not jobs:
+        raise ValueError("a group needs at least one job")
+    first = jobs[0]
     return {
-        "reference": str(reference_override or job.reference_path),
-        "subtitle": str(job.subtitle_path),
-        "output": str(job.output_path),
-        "options": job.options.to_dict(),
+        "reference": str(reference_override or first.reference_path),
+        "options": first.options.to_dict(),
         "serialize_speech": serialize_speech,
+        "items": [
+            {
+                "id": job.id,
+                "subtitle": str(job.subtitle_path),
+                "output": str(job.output_path),
+            }
+            for job in jobs
+        ],
     }
 
 
 class SyncProcess:
-    """One ffsubsync run, owned by one worker thread but cancellable from any."""
+    """One worker process handling one group, cancellable from any thread."""
 
     def __init__(self, spec: dict[str, Any]) -> None:
         self._spec = spec
+        self._job_ids = [str(item["id"]) for item in spec.get("items", [])]
         self._process: subprocess.Popen[str] | None = None
         self._lock = threading.Lock()
         self._cancelled = False
@@ -131,15 +153,18 @@ class SyncProcess:
         *,
         on_progress: ProgressCallback | None = None,
         on_log: LogCallback | None = None,
-    ) -> SyncResult:
+    ) -> dict[str, SyncResult]:
+        """Run the group. Returns one result per job id, always complete."""
         environment = dict(os.environ)
         environment["PYTHONIOENCODING"] = "utf-8"
         environment["PYTHONUNBUFFERED"] = "1"
 
         started = time.monotonic()
+        results: dict[str, SyncResult] = {}
+
         with self._lock:
             if self._cancelled:
-                return SyncResult(status=JobStatus.CANCELLED, error="Cancelled")
+                return self._fill(results, JobStatus.CANCELLED, "Cancelled", started)
             try:
                 process = subprocess.Popen(
                     worker_command(),
@@ -154,10 +179,11 @@ class SyncProcess:
                     creationflags=_creation_flags(),
                 )
             except OSError as exc:
-                return SyncResult(
-                    status=JobStatus.FAILED,
-                    return_code=1,
-                    error=f"Could not start sync worker: {exc}",
+                return self._fill(
+                    results,
+                    JobStatus.FAILED,
+                    f"Could not start sync worker: {exc}",
+                    started,
                 )
             self._process = process
 
@@ -168,19 +194,20 @@ class SyncProcess:
         )
         stderr_thread.start()
 
-        payload: dict[str, Any] | None = None
         try:
             if process.stdin is not None:
                 process.stdin.write(json.dumps(self._spec))
                 process.stdin.close()
         except (OSError, ValueError) as exc:
             self.cancel()
-            return SyncResult(
-                status=JobStatus.FAILED,
-                return_code=1,
-                error=f"Could not send job to worker: {exc}",
+            return self._fill(
+                results,
+                JobStatus.FAILED,
+                f"Could not send job to worker: {exc}",
+                started,
             )
 
+        fatal = ""
         assert process.stdout is not None
         for line in process.stdout:
             line = line.strip()
@@ -193,59 +220,90 @@ class SyncProcess:
             if not isinstance(event, dict):
                 continue
             kind = event.get("event")
+            raw_id = event.get("job_id")
+            job_id = str(raw_id) if raw_id is not None else None
             if kind == "progress" and on_progress is not None:
                 fraction = event.get("fraction")
                 on_progress(
+                    job_id,
                     float(fraction) if isinstance(fraction, int | float) else None,
                     str(event.get("stage", "Working")),
                 )
             elif kind == "log" and on_log is not None:
-                on_log(str(event.get("level", "INFO")), str(event.get("message", "")))
-            elif kind == "result":
-                payload = event
+                on_log(
+                    job_id,
+                    str(event.get("level", "INFO")),
+                    str(event.get("message", "")),
+                )
+            elif kind == "result" and job_id is not None:
+                results[job_id] = _result_from(event)
+            elif kind == "fatal":
+                fatal = str(event.get("error", ""))
 
         return_code = process.wait()
         stderr_thread.join(timeout=1.0)
 
         if self._cancelled:
-            return SyncResult(
-                status=JobStatus.CANCELLED,
-                return_code=return_code,
-                error="Cancelled",
-                duration_seconds=time.monotonic() - started,
-            )
+            # Whatever finished before the kill keeps its result; the rest never
+            # ran and are reported as cancelled rather than failed.
+            return self._fill(results, JobStatus.CANCELLED, "Cancelled", started)
 
-        if payload is None:
+        if len(results) < len(self._job_ids):
             tail = " | ".join(list(self._stderr_tail)[-5:])
-            return SyncResult(
-                status=JobStatus.FAILED,
-                return_code=return_code,
-                error=(
+            detail = fatal or tail
+            return self._fill(
+                results,
+                JobStatus.FAILED,
+                (
                     f"Sync worker exited with code {return_code} without reporting a "
-                    f"result{f': {tail}' if tail else ''}"
+                    f"result{f': {detail}' if detail else ''}"
                 ),
-                duration_seconds=time.monotonic() - started,
+                started,
+                return_code=return_code,
             )
+        return results
 
-        status = _STATUS_BY_NAME.get(
-            str(payload.get("status", "failed")), JobStatus.FAILED
-        )
-        reasons = payload.get("quality_reasons")
-        return SyncResult(
-            status=status,
-            return_code=int(payload.get("return_code", return_code) or 0),
-            offset_seconds=_optional_float(payload.get("offset_seconds")),
-            framerate_scale_factor=_optional_float(
-                payload.get("framerate_scale_factor")
-            ),
-            score=_optional_float(payload.get("score")),
-            quality_reasons=[str(item) for item in reasons]
-            if isinstance(reasons, list)
-            else [],
-            error=str(payload.get("error", "")),
-            duration_seconds=_optional_float(payload.get("duration_seconds"))
-            or (time.monotonic() - started),
-        )
+    def _fill(
+        self,
+        results: dict[str, SyncResult],
+        status: JobStatus,
+        error: str,
+        started: float,
+        *,
+        return_code: int = 1,
+    ) -> dict[str, SyncResult]:
+        """Give every job without a result the supplied outcome."""
+        elapsed = time.monotonic() - started
+        for job_id in self._job_ids:
+            results.setdefault(
+                job_id,
+                SyncResult(
+                    status=status,
+                    return_code=return_code,
+                    error=error,
+                    duration_seconds=elapsed,
+                ),
+            )
+        return results
+
+
+def _result_from(event: dict[str, Any]) -> SyncResult:
+    reasons = event.get("quality_reasons")
+    return SyncResult(
+        status=_STATUS_BY_NAME.get(
+            str(event.get("status", "failed")), JobStatus.FAILED
+        ),
+        return_code=int(event.get("return_code", 0) or 0),
+        offset_seconds=_optional_float(event.get("offset_seconds")),
+        framerate_scale_factor=_optional_float(event.get("framerate_scale_factor")),
+        score=_optional_float(event.get("score")),
+        quality_reasons=[str(item) for item in reasons]
+        if isinstance(reasons, list)
+        else [],
+        error=str(event.get("error", "")),
+        duration_seconds=_optional_float(event.get("duration_seconds")),
+        shared_extraction=bool(event.get("shared_extraction", False)),
+    )
 
 
 def _optional_float(value: object) -> float | None:

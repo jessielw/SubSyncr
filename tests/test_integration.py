@@ -18,6 +18,7 @@ from ffsubsyncui.core.models import (
     JobStatus,
     SyncJob,
     SyncOptions,
+    SyncResult,
     default_output_for,
 )
 
@@ -65,6 +66,11 @@ def make_pair(
     return build
 
 
+def _run_one(job: SyncJob) -> SyncResult:
+    """Run a single-job group and unwrap its one result."""
+    return SyncProcess(build_spec([job])).run()[job.id]
+
+
 def _job(reference: Path, subtitle: Path, **options: object) -> SyncJob:
     return SyncJob(
         reference_path=reference,
@@ -80,7 +86,7 @@ def test_real_sync_recovers_the_offset(
     reference, subtitle = make_pair(6.5)
     job = _job(reference, subtitle)
     validate(job)
-    result = SyncProcess(build_spec(job)).run()
+    result = _run_one(job)
 
     assert result.status is JobStatus.SUCCEEDED
     assert result.offset_seconds is not None
@@ -95,8 +101,9 @@ def test_progress_and_logs_reach_the_parent(
 ) -> None:
     reference, subtitle = make_pair(3.0)
     logs: list[tuple[str, str]] = []
-    SyncProcess(build_spec(_job(reference, subtitle))).run(
-        on_log=lambda level, message: logs.append((level, message))
+    job = _job(reference, subtitle)
+    SyncProcess(build_spec([job])).run(
+        on_log=lambda job_id, level, message: logs.append((level, message))
     )
     assert logs
     assert any("score" in message for _, message in logs)
@@ -107,7 +114,7 @@ def test_event_channel_is_not_corrupted_by_subtitle_output(
 ) -> None:
     """A result must always arrive, never be lost in stray stdout writes."""
     reference, subtitle = make_pair(2.0)
-    result = SyncProcess(build_spec(_job(reference, subtitle))).run()
+    result = _run_one(_job(reference, subtitle))
     assert result.status is JobStatus.SUCCEEDED
     assert "without reporting a result" not in result.error
 
@@ -153,7 +160,7 @@ def test_low_quality_gate_reports_skipped_not_succeeded(tmp_path: Path) -> None:
         # An unreachable threshold guarantees the gate trips.
         min_score=1e9,
     )
-    result = SyncProcess(build_spec(job)).run()
+    result = _run_one(job)
 
     assert result.status is JobStatus.SKIPPED_LOW_QUALITY
     assert result.quality_reasons
@@ -164,11 +171,12 @@ def test_cancellation_kills_the_child(
     make_pair: Callable[[float], tuple[Path, Path]],
 ) -> None:
     reference, subtitle = make_pair(4.0)
-    process = SyncProcess(build_spec(_job(reference, subtitle)))
+    job = _job(reference, subtitle)
+    process = SyncProcess(build_spec([job]))
     # Cancel before it starts: the run must still terminate promptly and report.
     process.cancel()
     started = time.monotonic()
-    result = process.run()
+    result = process.run()[job.id]
     assert result.status is JobStatus.CANCELLED
     assert time.monotonic() - started < 30
 
@@ -177,9 +185,10 @@ def test_cancellation_mid_flight(
     make_pair: Callable[[float], tuple[Path, Path]],
 ) -> None:
     reference, subtitle = make_pair(4.0)
-    process = SyncProcess(build_spec(_job(reference, subtitle)))
+    job = _job(reference, subtitle)
+    process = SyncProcess(build_spec([job]))
     threading.Timer(0.05, process.cancel).start()
-    result = process.run()
+    result = process.run()[job.id]
     # Very short jobs may finish first; either outcome proves no hang or crash.
     assert result.status in (JobStatus.CANCELLED, JobStatus.SUCCEEDED)
 
@@ -190,7 +199,7 @@ def test_overwrite_input_writes_in_place(
     reference, subtitle = make_pair(5.0)
     before = subtitle.read_text(encoding="utf-8")
     job = _job(reference, subtitle, overwrite_input=True)
-    result = SyncProcess(build_spec(job)).run()
+    result = _run_one(job)
     assert result.status is JobStatus.SUCCEEDED
     assert subtitle.read_text(encoding="utf-8") != before
     assert not default_output_for(subtitle).exists()

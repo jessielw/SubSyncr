@@ -23,7 +23,11 @@ from ffsubsyncui.core.store import JobStore
 
 
 class FakeProcess:
-    """Stands in for SyncProcess, recording what the queue asked for."""
+    """Stands in for SyncProcess, recording what the queue asked for.
+
+    One instance per *group*, matching the real engine, so tests can assert how
+    many processes a batch actually costs.
+    """
 
     instances: ClassVar[list[FakeProcess]] = []
     result_status = JobStatus.SUCCEEDED
@@ -31,6 +35,7 @@ class FakeProcess:
 
     def __init__(self, spec: dict[str, Any]) -> None:
         self.spec = spec
+        self.items = list(spec["items"])
         self.cancelled = False
         self._started = threading.Event()
         FakeProcess.instances.append(self)
@@ -38,24 +43,36 @@ class FakeProcess:
     def cancel(self) -> None:
         self.cancelled = True
 
-    def run(self, *, on_progress: Any = None, on_log: Any = None) -> SyncResult:
+    def run(
+        self, *, on_progress: Any = None, on_log: Any = None
+    ) -> dict[str, SyncResult]:
         self._started.set()
         if self.spec["serialize_speech"]:
             # ffsubsync writes the speech array beside the reference file.
             Path(self.spec["reference"]).with_suffix(".npz").write_bytes(b"speech")
         if on_progress is not None:
-            on_progress(0.5, "Extracting speech")
+            # job_id None means the group-wide extraction.
+            on_progress(None, 0.5, "Extracting speech")
         if on_log is not None:
-            on_log("INFO", "working")
+            on_log(None, "INFO", "working")
         if FakeProcess.delay:
             time.sleep(FakeProcess.delay)
-        if self.cancelled:
-            return SyncResult(status=JobStatus.CANCELLED, error="Cancelled")
-        return SyncResult(
-            status=FakeProcess.result_status,
-            offset_seconds=-1.5,
-            error="" if FakeProcess.result_status is JobStatus.SUCCEEDED else "boom",
-        )
+        results: dict[str, SyncResult] = {}
+        for index, item in enumerate(self.items):
+            if self.cancelled:
+                results[item["id"]] = SyncResult(
+                    status=JobStatus.CANCELLED, error="Cancelled"
+                )
+                continue
+            results[item["id"]] = SyncResult(
+                status=FakeProcess.result_status,
+                offset_seconds=-1.5,
+                error=(
+                    "" if FakeProcess.result_status is JobStatus.SUCCEEDED else "boom"
+                ),
+                shared_extraction=index > 0,
+            )
+        return results
 
 
 @pytest.fixture(autouse=True)
@@ -242,11 +259,12 @@ def test_only_the_first_job_in_a_group_extracts_speech(
     queue.add(jobs)
     _drain(queue)
 
-    serializing = [p for p in FakeProcess.instances if p.spec["serialize_speech"]]
-    assert len(serializing) == 1, "audio should be extracted exactly once"
+    # One process for the whole group, so the extraction happens exactly once.
+    assert len(FakeProcess.instances) == 1
+    assert len(FakeProcess.instances[0].items) == 3
 
-    reused = [p for p in FakeProcess.instances if p.spec["reference"].endswith(".npz")]
-    assert len(reused) == 2, "the other two should read the cached speech array"
+    results = [job.result for job in queue.snapshot()]
+    assert sum(1 for r in results if r and r.shared_extraction) == 2
 
     # The harvested array must not be left lying beside the user's media.
     assert not list(tmp_path.glob("*.npz"))
@@ -282,13 +300,62 @@ def test_speech_cache_survives_for_a_later_batch(
     assert FakeProcess.instances[0].spec["reference"].endswith(".npz")
 
 
-def test_jobs_without_a_group_never_serialize(
+def test_a_solo_job_still_populates_the_cache(
     build_queue: Callable[..., SyncQueue], make_job: Callable[..., SyncJob]
 ) -> None:
+    """So a second language for the same video is instant tomorrow."""
     queue = build_queue()
     queue.add([make_job("Solo", group_key=None)])
     _drain(queue)
-    assert not any(p.spec["serialize_speech"] for p in FakeProcess.instances)
+    assert FakeProcess.instances[0].spec["serialize_speech"] is True
+
+
+def test_subtitle_references_are_never_cached(
+    build_queue: Callable[..., SyncQueue], tmp_path: Any
+) -> None:
+    """Nothing expensive was extracted, so there is nothing worth storing."""
+    reference = tmp_path / "reference.srt"
+    reference.touch()
+    subtitle = tmp_path / "input.srt"
+    subtitle.touch()
+    queue = build_queue()
+    queue.add(
+        [
+            SyncJob(
+                reference_path=reference,
+                subtitle_path=subtitle,
+                output_path=tmp_path / "input.synced.srt",
+                group_key="subs",
+            )
+        ]
+    )
+    _drain(queue)
+    assert FakeProcess.instances[0].spec["serialize_speech"] is False
+
+
+def test_each_video_gets_its_own_process(
+    build_queue: Callable[..., SyncQueue], tmp_path: Any
+) -> None:
+    """Different references cannot share an extraction."""
+    jobs = []
+    for index in range(3):
+        reference = tmp_path / f"Show.S01E0{index}.mkv"
+        reference.touch()
+        subtitle = tmp_path / f"Show.S01E0{index}.en.srt"
+        subtitle.touch()
+        jobs.append(
+            SyncJob(
+                reference_path=reference,
+                subtitle_path=subtitle,
+                output_path=tmp_path / f"Show.S01E0{index}.en.synced.srt",
+                group_key=f"group-{index}",
+            )
+        )
+    queue = build_queue()
+    queue.add(jobs)
+    assert queue.pending_groups() == 3
+    _drain(queue)
+    assert len(FakeProcess.instances) == 3
 
 
 def test_shutdown_cancels_running_work(
@@ -303,3 +370,51 @@ def test_shutdown_cancels_running_work(
         time.sleep(0.01)
     queue.shutdown(timeout=8.0)
     assert FakeProcess.instances[0].cancelled is True
+
+
+def test_cancelling_one_job_stops_its_whole_group(
+    build_queue: Callable[..., SyncQueue], tmp_path: Any
+) -> None:
+    """Siblings share one ffsubsync run and cannot be separated.
+
+    The alternative would be to pretend a group member can be stopped alone,
+    which would silently leave the others running.
+    """
+    FakeProcess.delay = 1.0
+    reference = tmp_path / "Show.mkv"
+    reference.touch()
+    jobs = []
+    for language in ("en", "es"):
+        subtitle = tmp_path / f"Show.{language}.srt"
+        subtitle.touch()
+        jobs.append(
+            SyncJob(
+                reference_path=reference,
+                subtitle_path=subtitle,
+                output_path=tmp_path / f"Show.{language}.synced.srt",
+                group_key="shared",
+            )
+        )
+    queue = build_queue()
+    queue.add(jobs)
+    queue.start()
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not FakeProcess.instances:
+        time.sleep(0.01)
+    assert queue.cancel(jobs[0].id) is True
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and queue.counts().running:
+        time.sleep(0.02)
+    queue.shutdown()
+
+    assert all(job.status is JobStatus.CANCELLED for job in queue.snapshot())
+    # One process was cancelled, not two.
+    assert len(FakeProcess.instances) == 1
+
+
+def test_cancelling_an_unknown_job_is_harmless(
+    build_queue: Callable[..., SyncQueue],
+) -> None:
+    assert build_queue().cancel("no such job") is False
