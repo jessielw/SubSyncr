@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from ffsubsyncui.core.worker import CancelToken, EventChannel, dispatch
+from subsyncr.core.worker import CancelToken, EventChannel, dispatch
 
 
 class _Sink(io.StringIO):
@@ -75,13 +75,13 @@ def test_dispatch_defaults_to_ffsubsync(monkeypatch: pytest.MonkeyPatch) -> None
         seen["spec"] = spec
         return 0
 
-    module = sys.modules["ffsubsyncui.core.engines.ffsubsync"] = type(sys)("stub")
+    module = sys.modules["subsyncr.core.engines.ffsubsync"] = type(sys)("stub")
     monkeypatch.setattr(module, "run_group", fake_run_group, raising=False)
     try:
         assert dispatch({"items": []}, EventChannel(_Sink()), CancelToken()) == 0
         assert seen["spec"] == {"items": []}
     finally:
-        del sys.modules["ffsubsyncui.core.engines.ffsubsync"]
+        del sys.modules["subsyncr.core.engines.ffsubsync"]
 
 
 # -- cancellation --------------------------------------------------------
@@ -138,7 +138,7 @@ def test_cancel_is_safe_with_nothing_attached() -> None:
 
 def _run_worker(stdin_payload: str, *, close_stdin: bool = True) -> tuple[int, str]:
     process = subprocess.Popen(
-        [sys.executable, "-m", "ffsubsyncui.core.worker"],
+        [sys.executable, "-m", "subsyncr.core.worker"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -170,7 +170,7 @@ def test_closing_stdin_without_a_spec_exits_promptly() -> None:
 
 _INHERITS_STDIN = """
 import subprocess, sys
-from ffsubsyncui.core.worker import claim_stdin
+from subsyncr.core.worker import claim_stdin
 control = claim_stdin()
 # Anything an engine spawns inherits fd 0. If that is still the parent's pipe,
 # a tool that reads stdin (ffmpeg does) blocks until the sync is cancelled.

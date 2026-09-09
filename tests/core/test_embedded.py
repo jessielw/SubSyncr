@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ffsubsyncui.core import embedded
-from ffsubsyncui.core.embedded import Track
+from subsyncr.core import embedded
+from subsyncr.core.embedded import Track
 
 
 def _track(**overrides: object) -> Track:

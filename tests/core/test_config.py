@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from support import sync_options
 
-from ffsubsyncui.core.config import (
+from subsyncr.core.config import (
     MAX_CONCURRENCY,
     AppConfig,
     Theme,
@@ -108,9 +108,9 @@ def test_data_dir_honours_the_environment_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Used by the tests and by anyone wanting a portable install."""
-    from ffsubsyncui.core import config as config_module
+    from subsyncr.core import config as config_module
 
-    monkeypatch.setenv("FFSUBSYNCUI_DATA_DIR", str(tmp_path / "portable"))
+    monkeypatch.setenv("SUBSYNCR_DATA_DIR", str(tmp_path / "portable"))
     assert config_module.data_dir() == tmp_path / "portable"
     assert config_module.database_path().parent == tmp_path / "portable"
     assert config_module.speech_cache_dir().is_dir()

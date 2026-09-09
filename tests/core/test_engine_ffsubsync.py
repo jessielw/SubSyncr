@@ -11,8 +11,8 @@ from typing import Any
 
 from support import sync_options
 
-from ffsubsyncui.core.engines.ffsubsync import build_arguments
-from ffsubsyncui.core.models import SyncOptions
+from subsyncr.core.engines.ffsubsync import build_arguments
+from subsyncr.core.models import SyncOptions
 
 _ITEM: dict[str, Any] = {
     "id": "job-1",

@@ -6,8 +6,8 @@ from pathlib import Path
 
 from support import sync_options
 
-from ffsubsyncui.core.models import FFSubSyncOptions
-from ffsubsyncui.core.speech_cache import SpeechCache
+from subsyncr.core.models import FFSubSyncOptions
+from subsyncr.core.speech_cache import SpeechCache
 
 
 def _reference(tmp_path: Path, name: str = "ep.mkv") -> Path:

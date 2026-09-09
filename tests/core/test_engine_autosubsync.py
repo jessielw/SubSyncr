@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from support import sync_options
 
-from ffsubsyncui.core.engines import autosubsync
+from subsyncr.core.engines import autosubsync
 
 
 def test_the_packaged_model_can_be_found() -> None:

@@ -1,7 +1,7 @@
 [project]
-name = "ffsubsyncui"
+name = "subsyncr"
 version = "0.1.0"
-description = "A cross-platform batch queue UI for ffsubsync"
+description = "A cross-platform batch queue for subtitle synchronization"
 readme = "README.md"
 authors = [
     { name = "jessielw", email = "jessielw4049@gmail.com" },
@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ffsubsyncui = "ffsubsyncui.__main__:main"
+subsyncr = "subsyncr.__main__:main"
 
 [dependency-groups]
 dev = [

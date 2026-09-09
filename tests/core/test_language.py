@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ffsubsyncui.core.language import parse_subtitle_tags, strip_tags
+from subsyncr.core.language import parse_subtitle_tags, strip_tags
 
 
 @pytest.mark.parametrize(

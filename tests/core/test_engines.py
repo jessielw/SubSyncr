@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from ffsubsyncui.core import engines
-from ffsubsyncui.core.engines import EngineId, EngineKind, Reported
+from subsyncr.core import engines
+from subsyncr.core.engines import EngineId, EngineKind, Reported
 
 
 def test_every_registered_engine_is_keyed_by_its_own_id() -> None:
@@ -90,12 +90,12 @@ def test_registry_does_not_import_engine_implementations() -> None:
     assert not [
         name
         for name in imported
-        if name.startswith("ffsubsyncui.core.engines.")
-        and name != "ffsubsyncui.core.engines.base"
+        if name.startswith("subsyncr.core.engines.")
+        and name != "subsyncr.core.engines.base"
     ]
     # And every spec's module path is a real, importable-looking target.
     for spec in engines.all_specs():
-        assert spec.module.startswith("ffsubsyncui.core.engines.")
+        assert spec.module.startswith("subsyncr.core.engines.")
 
 
 # -- native engines ------------------------------------------------------

@@ -14,13 +14,13 @@ from typing import Any, ClassVar
 
 import pytest
 
-from ffsubsyncui.core import queue as queue_module
-from ffsubsyncui.core.config import AppConfig
-from ffsubsyncui.core.engines import EngineId
-from ffsubsyncui.core.models import JobStatus, SyncJob, SyncResult
-from ffsubsyncui.core.queue import QueueCallbacks, SyncQueue
-from ffsubsyncui.core.speech_cache import SpeechCache
-from ffsubsyncui.core.store import JobStore
+from subsyncr.core import queue as queue_module
+from subsyncr.core.config import AppConfig
+from subsyncr.core.engines import EngineId
+from subsyncr.core.models import JobStatus, SyncJob, SyncResult
+from subsyncr.core.queue import QueueCallbacks, SyncQueue
+from subsyncr.core.speech_cache import SpeechCache
+from subsyncr.core.store import JobStore
 
 
 class FakeProcess:

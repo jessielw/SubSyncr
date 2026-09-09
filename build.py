@@ -20,12 +20,12 @@ def main() -> int:
             "pyinstaller",
             "--clean",
             "--noconfirm",
-            str(root / "packaging" / "ffsubsyncui.spec"),
+            str(root / "packaging" / "subsyncr.spec"),
         ],
         cwd=root,
         check=True,
     )
-    output = root / "dist" / "FFSubSyncUI"
+    output = root / "dist" / "SubSyncr"
     if not output.exists():
         raise FileNotFoundError(f"PyInstaller output was not created: {output}")
     print(f"Build complete: {output}")

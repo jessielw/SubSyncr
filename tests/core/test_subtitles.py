@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from ffsubsyncui.core import encoding as encodings, subtitles
+from subsyncr.core import encoding as encodings, subtitles
 
 _SRT = """1
 00:00:10,000 --> 00:00:12,000

@@ -12,8 +12,8 @@ from typing import Any
 
 from support import sync_options
 
-from ffsubsyncui.core.engines import alass, lapse
-from ffsubsyncui.core.engines.runner import clean_line, percent_in
+from subsyncr.core.engines import alass, lapse
+from subsyncr.core.engines.runner import clean_line, percent_in
 
 
 def _options(**overrides: Any) -> dict[str, Any]:

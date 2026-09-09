@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 from support import sync_options
 
-from ffsubsyncui.core.engines import EngineId
-from ffsubsyncui.core.models import (
+from subsyncr.core.engines import EngineId
+from subsyncr.core.models import (
     FileOptions,
     JobStatus,
     LapseOptions,

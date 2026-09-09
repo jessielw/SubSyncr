@@ -9,9 +9,9 @@ import sqlite3
 
 from support import sync_options
 
-from ffsubsyncui.core.engines import EngineId
-from ffsubsyncui.core.models import JobStatus, SyncJob, SyncResult
-from ffsubsyncui.core.store import SCHEMA_VERSION, JobStore
+from subsyncr.core.engines import EngineId
+from subsyncr.core.models import JobStatus, SyncJob, SyncResult
+from subsyncr.core.store import SCHEMA_VERSION, JobStore
 
 
 def test_queue_round_trip(store: JobStore, make_job: Callable[..., SyncJob]) -> None:

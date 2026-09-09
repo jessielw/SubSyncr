@@ -14,13 +14,13 @@ import threading
 from PySide6.QtCore import QSettings, Qt
 import pytest
 
-from ffsubsyncui.core.config import Theme
-from ffsubsyncui.core.models import JobStatus, SyncJob, SyncResult
-from ffsubsyncui.core.queue import SyncQueue
-from ffsubsyncui.qt.add_job import AddJobDialog
-from ffsubsyncui.qt.main_window import MainWindow
-from ffsubsyncui.qt.match_view import BatchMatchDialog
-from ffsubsyncui.qt.queue_view import (
+from subsyncr.core.config import Theme
+from subsyncr.core.models import JobStatus, SyncJob, SyncResult
+from subsyncr.core.queue import SyncQueue
+from subsyncr.qt.add_job import AddJobDialog
+from subsyncr.qt.main_window import MainWindow
+from subsyncr.qt.match_view import BatchMatchDialog
+from subsyncr.qt.queue_view import (
     COLUMN_LANGUAGE,
     COLUMN_PROGRESS,
     COLUMN_RESULT,
@@ -29,12 +29,12 @@ from ffsubsyncui.qt.queue_view import (
     COLUMN_SUBTITLE,
     JobTableModel,
 )
-from ffsubsyncui.qt.settings_view import SettingsDialog
+from subsyncr.qt.settings_view import SettingsDialog
 
 
 @pytest.fixture
 def window(qtbot) -> Iterator[MainWindow]:
-    instance = MainWindow(settings=QSettings("FFSubSyncUI-tests", "gui"))
+    instance = MainWindow(settings=QSettings("SubSyncr-tests", "gui"))
     qtbot.addWidget(instance)
     yield instance
     instance.bridge.detach()
@@ -243,7 +243,7 @@ def test_cancelling_settings_reverts_the_previewed_theme(
     # The offscreen QPA platform used for tests doesn't actually report color
     # scheme changes, so spy on apply_theme rather than styleHints().
     applied: list[Theme] = []
-    monkeypatch.setattr("ffsubsyncui.qt.settings_view.apply_theme", applied.append)
+    monkeypatch.setattr("subsyncr.qt.settings_view.apply_theme", applied.append)
 
     dialog = SettingsDialog(window.config, parent=window)
     qtbot.addWidget(dialog)
@@ -308,7 +308,7 @@ def test_status_bar_reports_group_count_on_add(
 
 def test_no_estimate_before_enough_samples(window: MainWindow) -> None:
     """An ETA from one data point is noise, so none is shown."""
-    from ffsubsyncui.core.queue import QueueCounts
+    from subsyncr.core.queue import QueueCounts
 
     window._batch_started = None
     assert window._estimate_remaining(QueueCounts(ready=5)) == ""
@@ -357,7 +357,7 @@ def test_dropping_subtitles_without_a_video_explains_itself(
     folder = media_tree(["Show.S01E01.en.srt", "Show.S01E01.es.srt"])
     shown: list[str] = []
     monkeypatch.setattr(
-        "ffsubsyncui.qt.main_window.QMessageBox.information",
+        "subsyncr.qt.main_window.QMessageBox.information",
         lambda *args, **kwargs: shown.append(args[2]),
     )
     monkeypatch.setattr(

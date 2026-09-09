@@ -14,8 +14,8 @@ import time
 import pytest
 from support import sync_options
 
-from ffsubsyncui.core.engine import SyncProcess, build_spec, validate
-from ffsubsyncui.core.models import (
+from subsyncr.core.engine import SyncProcess, build_spec, validate
+from subsyncr.core.models import (
     JobStatus,
     SyncJob,
     SyncResult,
@@ -120,7 +120,7 @@ def test_event_channel_is_not_corrupted_by_subtitle_output(
 
 
 def test_missing_reference_is_rejected_before_spawning(tmp_path: Path) -> None:
-    from ffsubsyncui.core.engine import EngineError
+    from subsyncr.core.engine import EngineError
 
     subtitle = _write_subtitles(tmp_path / "in.srt", [1.0, 2.0])
     job = _job(tmp_path / "absent.srt", subtitle)
@@ -131,7 +131,7 @@ def test_missing_reference_is_rejected_before_spawning(tmp_path: Path) -> None:
 def test_existing_output_is_not_silently_replaced(
     make_pair: Callable[[float], tuple[Path, Path]],
 ) -> None:
-    from ffsubsyncui.core.engine import EngineError
+    from subsyncr.core.engine import EngineError
 
     reference, subtitle = make_pair(1.0)
     job = _job(reference, subtitle)

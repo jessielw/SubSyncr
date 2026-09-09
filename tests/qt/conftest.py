@@ -19,5 +19,5 @@ def isolated_data_dir(
 ) -> Iterator[Path]:
     """Redirect config, database and speech cache into the test's tmp_path."""
     target = tmp_path / "appdata"
-    monkeypatch.setenv("FFSUBSYNCUI_DATA_DIR", str(target))
+    monkeypatch.setenv("SUBSYNCR_DATA_DIR", str(target))
     yield target

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ffsubsyncui.core.models import FFSubSyncOptions, FileOptions, SyncOptions
+from subsyncr.core.models import FFSubSyncOptions, FileOptions, SyncOptions
 
 
 def sync_options(**overrides: object) -> SyncOptions:

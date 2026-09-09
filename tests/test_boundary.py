@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-_SOURCE_ROOT = Path(__file__).resolve().parent.parent / "src" / "ffsubsyncui"
+_SOURCE_ROOT = Path(__file__).resolve().parent.parent / "src" / "subsyncr"
 _UI_FREE_PACKAGES = ("core", "cli")
 
 
@@ -55,7 +55,7 @@ def test_core_does_not_import_cli_or_qt() -> None:
         names = sorted(
             name
             for name in _imported_names(path)
-            if name.startswith(("ffsubsyncui.qt", "ffsubsyncui.cli"))
+            if name.startswith(("subsyncr.qt", "subsyncr.cli"))
         )
         if names:
             leaked[path.relative_to(_SOURCE_ROOT).as_posix()] = names

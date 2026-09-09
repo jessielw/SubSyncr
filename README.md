@@ -1,4 +1,4 @@
-# FFSubSync UI
+# SubSyncr
 
 A desktop batch queue for [ffsubsync](https://github.com/smacke/ffsubsync), built
 for the job it is actually good at: taking a folder of video files and a folder of
@@ -43,20 +43,20 @@ fills, so the interesting part here is the **matching and review**, not the sync
 
 ```powershell
 uv sync --group dev
-uv run ffsubsyncui            # GUI
-uv run ffsubsyncui doctor     # report paths, ffmpeg status and versions
+uv run subsyncr            # GUI
+uv run subsyncr doctor     # report paths, ffmpeg status and versions
 ```
 
 ### CLI
 
 ```powershell
-uv run ffsubsyncui match  D:\media\Season01              # propose pairings only
-uv run ffsubsyncui match  D:\media\Season01 --json
-uv run ffsubsyncui batch  D:\media\Season01 --auto-match 90 --workers 2
-uv run ffsubsyncui batch  D:\movies --fast                  # sample, do not read in full
-uv run ffsubsyncui batch  D:\good-subs D:ad-subs --subs-as-reference
-uv run ffsubsyncui sync   episode.mkv episode.en.srt
-uv run ffsubsyncui history --limit 20
+uv run subsyncr match  D:\media\Season01              # propose pairings only
+uv run subsyncr match  D:\media\Season01 --json
+uv run subsyncr batch  D:\media\Season01 --auto-match 90 --workers 2
+uv run subsyncr batch  D:\movies --fast                  # sample, do not read in full
+uv run subsyncr batch  D:\good-subs D:ad-subs --subs-as-reference
+uv run subsyncr sync   episode.mkv episode.en.srt
+uv run subsyncr history --limit 20
 ```
 
 `match` and `batch` take an optional second folder when the subtitles live
@@ -146,7 +146,7 @@ uv run ruff check . ; uv run ruff format --check . ; uv run basedpyright
 ```
 
 Tests need neither ffmpeg nor a display: the integration tests use subtitle files
-as the reference, and the Qt tests run offscreen. Set `FFSUBSYNCUI_DATA_DIR` to
+as the reference, and the Qt tests run offscreen. Set `SUBSYNCR_DATA_DIR` to
 keep config, database and cache out of the real user data directory.
 
 ## Build
@@ -157,12 +157,12 @@ PyInstaller cannot cross-compile, so run this on each target OS:
 uv run --group build python build.py
 ```
 
-The onedir bundle lands in `dist/FFSubSyncUI`. The executable wears three hats and
+The onedir bundle lands in `dist/SubSyncr`. The executable wears three hats and
 dispatches on its first argument: `--sync-worker` for the child process, a
 subcommand for the CLI, and anything else for the GUI. ffmpeg is deliberately not
 bundled.
 
 ## Where things are stored
 
-`ffsubsyncui doctor` prints the exact paths. Config is JSON, the queue and history
+`subsyncr doctor` prints the exact paths. Config is JSON, the queue and history
 are SQLite, and cached speech arrays live under the platform cache directory.

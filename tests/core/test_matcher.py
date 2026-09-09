@@ -5,14 +5,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from ffsubsyncui.core.matcher import (
+from subsyncr.core.matcher import (
     build_subtitle_groups,
     extract_identifier,
     normalize_name,
     propose_matches,
 )
-from ffsubsyncui.core.models import MatchMethod
-from ffsubsyncui.core.scanner import scan_media, scan_subtitles
+from subsyncr.core.models import MatchMethod
+from subsyncr.core.scanner import scan_media, scan_subtitles
 
 # The media_tree fixture also takes a keyword-only `subfolder`.
 Tree = Callable[..., Path]
@@ -144,7 +144,7 @@ def test_recursive_scan_finds_nested_files(media_tree: Tree) -> None:
 
 def test_subtitle_references_can_be_scanned(media_tree: Tree) -> None:
     """Aligning against a known-good subtitle needs no ffmpeg at all."""
-    from ffsubsyncui.core.scanner import scan_references
+    from subsyncr.core.scanner import scan_references
 
     folder = media_tree(["Show.S01E01.mkv", "Show.S01E01.en.srt", "Show.S01E01.es.srt"])
     assert [p.name for p in scan_references(folder)] == ["Show.S01E01.mkv"]

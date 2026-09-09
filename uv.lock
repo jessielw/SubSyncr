@@ -267,61 +267,6 @@ wheels = [
 ]
 
 [[package]]
-name = "ffsubsyncui"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "autosubsync" },
-    { name = "charset-normalizer" },
-    { name = "ffsubsync" },
-    { name = "platformdirs" },
-    { name = "pyside6-essentials" },
-    { name = "pysubs2" },
-    { name = "rapidfuzz" },
-]
-
-[package.dev-dependencies]
-build = [
-    { name = "pyinstaller" },
-    { name = "pyinstaller-hooks-contrib" },
-    { name = "setuptools" },
-]
-dev = [
-    { name = "basedpyright" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "pytest-qt" },
-    { name = "pytest-timeout" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "autosubsync", specifier = ">=1.0,<2" },
-    { name = "charset-normalizer", specifier = ">=3.4,<4" },
-    { name = "ffsubsync", specifier = ">=0.5.1,<0.6" },
-    { name = "platformdirs", specifier = ">=4.3,<5" },
-    { name = "pyside6-essentials", specifier = ">=6.8,<7" },
-    { name = "pysubs2", specifier = ">=1.7,<2" },
-    { name = "rapidfuzz", specifier = ">=3.14,<4" },
-]
-
-[package.metadata.requires-dev]
-build = [
-    { name = "pyinstaller", specifier = ">=6.15" },
-    { name = "pyinstaller-hooks-contrib", specifier = ">=2025.8" },
-    { name = "setuptools", specifier = ">=78.1.1,<82" },
-]
-dev = [
-    { name = "basedpyright", specifier = ">=1.31" },
-    { name = "pytest", specifier = ">=8.4" },
-    { name = "pytest-cov", specifier = ">=7" },
-    { name = "pytest-qt", specifier = ">=4.5" },
-    { name = "pytest-timeout", specifier = ">=2.4" },
-    { name = "ruff", specifier = ">=0.12" },
-]
-
-[[package]]
 name = "future"
 version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -721,6 +666,61 @@ name = "srt"
 version = "3.5.3"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/66/b7/4a1bc231e0681ebf339337b0cd05b91dc6a0d701fa852bb812e244b7a030/srt-3.5.3.tar.gz", hash = "sha256:4884315043a4f0740fd1f878ed6caa376ac06d70e135f306a6dc44632eed0cc0", size = 28296, upload-time = "2023-03-28T02:35:44.007Z" }
+
+[[package]]
+name = "subsyncr"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "autosubsync" },
+    { name = "charset-normalizer" },
+    { name = "ffsubsync" },
+    { name = "platformdirs" },
+    { name = "pyside6-essentials" },
+    { name = "pysubs2" },
+    { name = "rapidfuzz" },
+]
+
+[package.dev-dependencies]
+build = [
+    { name = "pyinstaller" },
+    { name = "pyinstaller-hooks-contrib" },
+    { name = "setuptools" },
+]
+dev = [
+    { name = "basedpyright" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "pytest-qt" },
+    { name = "pytest-timeout" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "autosubsync", specifier = ">=1.0,<2" },
+    { name = "charset-normalizer", specifier = ">=3.4,<4" },
+    { name = "ffsubsync", specifier = ">=0.5.1,<0.6" },
+    { name = "platformdirs", specifier = ">=4.3,<5" },
+    { name = "pyside6-essentials", specifier = ">=6.8,<7" },
+    { name = "pysubs2", specifier = ">=1.7,<2" },
+    { name = "rapidfuzz", specifier = ">=3.14,<4" },
+]
+
+[package.metadata.requires-dev]
+build = [
+    { name = "pyinstaller", specifier = ">=6.15" },
+    { name = "pyinstaller-hooks-contrib", specifier = ">=2025.8" },
+    { name = "setuptools", specifier = ">=78.1.1,<82" },
+]
+dev = [
+    { name = "basedpyright", specifier = ">=1.31" },
+    { name = "pytest", specifier = ">=8.4" },
+    { name = "pytest-cov", specifier = ">=7" },
+    { name = "pytest-qt", specifier = ">=4.5" },
+    { name = "pytest-timeout", specifier = ">=2.4" },
+    { name = "ruff", specifier = ">=0.12" },
+]
 
 [[package]]
 name = "tqdm"

@@ -12,9 +12,9 @@ from pathlib import Path
 import pytest
 from support import sync_options
 
-from ffsubsyncui.core.config import AppConfig
-from ffsubsyncui.core.models import SyncJob, SyncOptions, default_output_for
-from ffsubsyncui.core.store import JobStore
+from subsyncr.core.config import AppConfig
+from subsyncr.core.models import SyncJob, SyncOptions, default_output_for
+from subsyncr.core.store import JobStore
 
 
 @pytest.fixture
