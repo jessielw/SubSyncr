@@ -14,6 +14,7 @@ dependencies = [
     "platformdirs>=4.3,<5",
     "pyside6-essentials>=6.8,<7",
     "pysubs2>=1.7,<2",
+    "qtawesome>=1.4,<2",
     "rapidfuzz>=3.14,<4",
 ]
 

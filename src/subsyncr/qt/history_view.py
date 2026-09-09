@@ -23,6 +23,11 @@ from PySide6.QtWidgets import (
 
 from subsyncr.core.models import JobStatus, SyncJob
 from subsyncr.core.store import HistoryEntry, JobStore
+from subsyncr.qt.icons import Icon
+from subsyncr.qt.palette import status_color
+from subsyncr.qt.sizing import SIZE_HISTORY, SPACING
+from subsyncr.qt.theme import ThemeManager
+from subsyncr.qt.widgets import enable_row_stripes
 
 _LABELS = {
     JobStatus.SUCCEEDED: "Done",
@@ -38,7 +43,8 @@ class HistoryDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("History")
-        self.resize(940, 560)
+        self.resize(*SIZE_HISTORY)
+        self._theme = ThemeManager.for_app()
         self._store = store
         self._limit = max(1, history_limit or 500)
         self._entries: list[HistoryEntry] = []
@@ -50,6 +56,7 @@ class HistoryDialog(QDialog):
         clear = QPushButton("Clear history", self)
         clear.clicked.connect(self._clear)
         search_row = QHBoxLayout()
+        search_row.setSpacing(SPACING)
         search_row.addWidget(self.search, 1)
         search_row.addWidget(clear)
 
@@ -60,7 +67,7 @@ class HistoryDialog(QDialog):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setAlternatingRowColors(True)
+        enable_row_stripes(self.table)
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
         for column in (0, 1, 3, 4):
@@ -71,11 +78,15 @@ class HistoryDialog(QDialog):
         self.summary = QLabel(self)
         requeue = QPushButton("Requeue selected", self)
         requeue.clicked.connect(self._accept_requeue)
+        if self._theme is not None:
+            self._theme.register(clear, Icon.REMOVE)
+            self._theme.register(requeue, Icon.RETRY)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
         buttons.rejected.connect(self.reject)
         buttons.addButton(requeue, QDialogButtonBox.ButtonRole.ActionRole)
 
         layout = QVBoxLayout(self)
+        layout.setSpacing(SPACING)
         layout.addLayout(search_row)
         layout.addWidget(self.table, 1)
         layout.addWidget(self.summary)
@@ -113,6 +124,10 @@ class HistoryDialog(QDialog):
             )
             for column, text in enumerate(values):
                 item = QTableWidgetItem(text)
+                if column == 1:
+                    color = status_color(entry.status, self.palette())
+                    if color is not None:
+                        item.setForeground(color)
                 if column == 2:
                     item.setToolTip(
                         f"{entry.subtitle_path}\nreference: {entry.reference_path}"

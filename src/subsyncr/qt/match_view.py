@@ -9,8 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Slot
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtCore import QEvent, Qt, Slot
+from PySide6.QtGui import QBrush
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -37,11 +36,11 @@ from subsyncr.core.matcher import DEFAULT_THRESHOLD, propose_matches
 from subsyncr.core.models import MatchMethod, SyncJob, SyncOptions
 from subsyncr.core.planner import build_job, group_key_for
 from subsyncr.core.scanner import scan_references, scan_subtitles
-
-SUBTITLE_FILTER = "Subtitle files (*.srt *.ass *.ssa *.sub *.vtt);;All files (*)"
-
-_UNMATCHED_BRUSH = QBrush(QColor("#7c2d12"))
-_AMBIGUOUS_BRUSH = QBrush(QColor("#78350f"))
+from subsyncr.qt.icons import Icon
+from subsyncr.qt.palette import ambiguous_color, unmatched_color
+from subsyncr.qt.sizing import SIZE_MATCH, SPACING
+from subsyncr.qt.theme import ThemeManager
+from subsyncr.qt.widgets import SUBTITLE_FILTER, PathField, enable_row_stripes
 
 COLUMN_INCLUDE = 0
 COLUMN_VIDEO = 1
@@ -67,32 +66,6 @@ class _Row:
         return any("runner-up" in reason for reason in self.reasons)
 
 
-class PathField(QWidget):
-    """A line edit with a folder browse button."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.edit = QLineEdit(self)
-        button = QPushButton("Browse...", self)
-        button.clicked.connect(self._browse)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.edit, 1)
-        layout.addWidget(button)
-
-    def text(self) -> str:
-        return self.edit.text().strip()
-
-    def set_text(self, value: str) -> None:
-        self.edit.setText(value)
-
-    @Slot()
-    def _browse(self) -> None:
-        selected = QFileDialog.getExistingDirectory(self, "Select folder", self.text())
-        if selected:
-            self.set_text(selected)
-
-
 class BatchMatchDialog(QDialog):
     def __init__(
         self,
@@ -108,14 +81,17 @@ class BatchMatchDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Match folders")
-        self.resize(1080, 640)
+        self.resize(*SIZE_MATCH)
         self._options = options
         self._output_suffix = output_suffix
         self._rows: list[_Row] = []
+        self._extra_note = ""
 
-        self.video_folder = PathField(self)
+        self.video_folder = PathField(caption="Select the video folder", parent=self)
         self.video_folder.set_text(video_folder)
-        self.subtitle_folder = PathField(self)
+        self.subtitle_folder = PathField(
+            caption="Select the subtitle folder", parent=self
+        )
         self.subtitle_folder.set_text(subtitle_folder)
         self.recursive = QCheckBox("Include subfolders", self)
         self.recursive.setChecked(recursive)
@@ -148,7 +124,13 @@ class BatchMatchDialog(QDialog):
         )
         scan_button = QPushButton("Scan", self)
         scan_button.setDefault(True)
-        scan_button.clicked.connect(self._scan)
+        scan_button.clicked.connect(self.scan)
+        self._theme = ThemeManager.for_app()
+        if self._theme is not None:
+            self._theme.register(scan_button, Icon.SCAN)
+            # Brushes are baked into the items, so they cannot follow the
+            # palette on their own the way the queue table's do.
+            self._theme.changed.connect(self._recolor_rows)
 
         form = QFormLayout()
         form.addRow("Video folder", self.video_folder)
@@ -171,7 +153,7 @@ class BatchMatchDialog(QDialog):
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.table.setAlternatingRowColors(True)
+        enable_row_stripes(self.table)
         self.table.verticalHeader().setVisible(False)
         self.table.itemChanged.connect(self._item_changed)
         self.table.doubleClicked.connect(self._choose_for_current)
@@ -190,6 +172,9 @@ class BatchMatchDialog(QDialog):
         choose.clicked.connect(self._choose_for_current)
         clear = QPushButton("Clear pairing", self)
         clear.clicked.connect(self._clear_selected)
+        if self._theme is not None:
+            self._theme.register(choose, Icon.CHOOSE)
+            self._theme.register(clear, Icon.CLEAR)
         include_all = QPushButton("Queue all matched", self)
         include_all.clicked.connect(lambda: self._set_include_all(True))
         exclude_all = QPushButton("Queue none", self)
@@ -212,6 +197,7 @@ class BatchMatchDialog(QDialog):
         self._ok_button.setEnabled(False)
 
         layout = QVBoxLayout(self)
+        layout.setSpacing(SPACING)
         layout.addWidget(source_box)
         layout.addWidget(self.table, 1)
         layout.addLayout(actions)
@@ -221,7 +207,7 @@ class BatchMatchDialog(QDialog):
     # -- scanning --------------------------------------------------------
 
     @Slot()
-    def _scan(self) -> None:
+    def scan(self) -> None:
         video_dir = Path(self.video_folder.text()) if self.video_folder.text() else None
         subtitle_text = self.subtitle_folder.text()
         if video_dir is None or not video_dir.is_dir():
@@ -271,8 +257,6 @@ class BatchMatchDialog(QDialog):
         self._extra_note = f", {leftover} subtitles matched nothing" if leftover else ""
         self._update_summary()
 
-    _extra_note = ""
-
     def _populate(self) -> None:
         self.table.blockSignals(True)
         self.table.setRowCount(len(self._rows))
@@ -307,10 +291,22 @@ class BatchMatchDialog(QDialog):
             if tooltip:
                 item.setToolTip(tooltip)
             if row.subtitle is None:
-                item.setForeground(_UNMATCHED_BRUSH)
+                item.setForeground(QBrush(unmatched_color(self.palette())))
             elif row.ambiguous:
-                item.setForeground(_AMBIGUOUS_BRUSH)
+                item.setForeground(QBrush(ambiguous_color(self.palette())))
             self.table.setItem(index, column, item)
+
+    @Slot()
+    def _recolor_rows(self) -> None:
+        for index, row in enumerate(self._rows):
+            self._fill_row(index, row)
+
+    def changeEvent(self, event: QEvent) -> None:
+        # Covers a palette change that arrives without a scheme change, such
+        # as the dialog being reparented.
+        if event.type() is QEvent.Type.PaletteChange and self._rows:
+            self._recolor_rows()
+        super().changeEvent(event)
 
     # -- editing ---------------------------------------------------------
 

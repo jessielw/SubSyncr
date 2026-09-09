@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
-    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -40,7 +39,6 @@ from subsyncr.core.config import (
     speech_cache_dir,
 )
 from subsyncr.core.engines import EngineKind
-from subsyncr.core.ffmpeg import probe
 from subsyncr.core.models import (
     LAPSE_MODES,
     VAD_CHOICES,
@@ -51,7 +49,14 @@ from subsyncr.core.models import (
     SyncOptions,
 )
 from subsyncr.core.speech_cache import SpeechCache
-from subsyncr.qt.theme import THEME_LABELS, apply_theme
+from subsyncr.qt.icons import Icon
+from subsyncr.qt.sizing import (
+    FALLBACK_LIST_HEIGHT,
+    SIZE_SETTINGS,
+    SPACING,
+)
+from subsyncr.qt.theme import THEME_LABELS, ThemeManager, apply_theme
+from subsyncr.qt.widgets import FFmpegStatusLabel, PathField
 
 
 class _OptionalDouble(QWidget):
@@ -91,7 +96,8 @@ class SettingsDialog(QDialog):
     def __init__(self, config: AppConfig, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(660, 520)
+        self.resize(*SIZE_SETTINGS)
+        self._theme = ThemeManager.for_app()
         self._config = config
         # Theme changes preview live; restored if the dialog is cancelled.
         self._original_theme = config.theme
@@ -115,6 +121,7 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
+        layout.setSpacing(SPACING)
         layout.addWidget(tabs)
         layout.addWidget(buttons)
 
@@ -166,7 +173,10 @@ class SettingsDialog(QDialog):
         self._cache_label = QLabel(page)
         clear_cache = QPushButton("Clear cache", page)
         clear_cache.clicked.connect(self._clear_cache)
+        if self._theme is not None:
+            self._theme.register(clear_cache, Icon.CLEAR)
         cache_row = QHBoxLayout()
+        cache_row.setSpacing(SPACING)
         cache_row.addWidget(self._cache_label, 1)
         cache_row.addWidget(clear_cache)
         self._update_cache_label()
@@ -225,7 +235,7 @@ class SettingsDialog(QDialog):
                 if spec.id in options.fallback_chain
                 else Qt.CheckState.Unchecked
             )
-        self.fallback.setMaximumHeight(110)
+        self.fallback.setMaximumHeight(FALLBACK_LIST_HEIGHT)
 
         form = QFormLayout(page)
         form.addRow("Sync engine", self.engine)
@@ -506,16 +516,14 @@ class SettingsDialog(QDialog):
             "never replaced, so re-running cannot bury the true original."
         )
 
-        self.ffmpeg_path = QLineEdit(options.environment.ffmpeg_path, page)
-        self.ffmpeg_path.setPlaceholderText("leave empty to use PATH")
-        browse = QPushButton("Browse...", page)
-        browse.clicked.connect(self._browse_ffmpeg)
-        ffmpeg_row = QHBoxLayout()
-        ffmpeg_row.addWidget(self.ffmpeg_path, 1)
-        ffmpeg_row.addWidget(browse)
-        self._ffmpeg_status = QLabel(page)
-        self._ffmpeg_status.setWordWrap(True)
-        self.ffmpeg_path.textChanged.connect(self._update_ffmpeg_status)
+        self.ffmpeg_field = PathField(
+            caption="Select the folder containing ffmpeg",
+            on_change=self._update_ffmpeg_status,
+            parent=page,
+        )
+        self.ffmpeg_field.set_text(options.environment.ffmpeg_path)
+        self.ffmpeg_field.edit.setPlaceholderText("leave empty to use PATH")
+        self._ffmpeg_status = FFmpegStatusLabel(page)
         self._update_ffmpeg_status()
 
         form = QFormLayout(page)
@@ -524,7 +532,7 @@ class SettingsDialog(QDialog):
         form.addRow("Extra offset", self.apply_offset)
         form.addRow("", self.replace_output)
         form.addRow("", self.backup_before_overwrite)
-        form.addRow("ffmpeg folder", ffmpeg_row)
+        form.addRow("ffmpeg folder", self.ffmpeg_field)
         form.addRow("", self._ffmpeg_status)
         return page
 
@@ -541,20 +549,8 @@ class SettingsDialog(QDialog):
         super().reject()
 
     @Slot()
-    def _browse_ffmpeg(self) -> None:
-        selected = QFileDialog.getExistingDirectory(
-            self, "Select the folder containing ffmpeg", self.ffmpeg_path.text()
-        )
-        if selected:
-            self.ffmpeg_path.setText(selected)
-
-    @Slot()
     def _update_ffmpeg_status(self) -> None:
-        status = probe(self.ffmpeg_path.text())
-        self._ffmpeg_status.setText(status.message)
-        self._ffmpeg_status.setStyleSheet(
-            "color: #15803d;" if status.ready else "color: #b45309;"
-        )
+        self._ffmpeg_status.refresh(self.ffmpeg_field.text())
 
     def _update_cache_label(self) -> None:
         megabytes = SpeechCache(speech_cache_dir()).size_bytes() / (1024 * 1024)
@@ -600,7 +596,7 @@ class SettingsDialog(QDialog):
             backup_before_overwrite=self.backup_before_overwrite.isChecked(),
         )
         sync.environment = replace(
-            sync.environment, ffmpeg_path=self.ffmpeg_path.text().strip()
+            sync.environment, ffmpeg_path=self.ffmpeg_field.text()
         )
         sync.engine = self.engine.currentData()
         sync.extract_embedded = self.extract_embedded.isChecked()
@@ -644,5 +640,8 @@ class SettingsDialog(QDialog):
             speech_cache_enabled=self.speech_cache.isChecked(),
             history_limit=self.history_limit.value(),
             auto_start=self.auto_start.isChecked(),
+            # Not editable here, but it is a saved setting: dropping it would
+            # reset the match dialog's toggle every time settings are saved.
+            fast_mode=self._config.fast_mode,
         )
         return updated.normalized()

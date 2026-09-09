@@ -79,9 +79,3 @@ def probe(configured_path: str = "") -> FFmpegStatus:
     return FFmpegStatus(
         True, f"ffmpeg ready: {directory}", directory, Path(ffmpeg), Path(ffprobe)
     )
-
-
-def status(configured_path: str = "") -> tuple[bool, str]:
-    """Backwards-compatible tuple form used by simple status displays."""
-    result = probe(configured_path)
-    return result.ready, result.message

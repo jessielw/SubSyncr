@@ -9,12 +9,9 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
-    QFileDialog,
     QFormLayout,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
-    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -22,45 +19,8 @@ from PySide6.QtWidgets import (
 from subsyncr.core.language import parse_subtitle_tags
 from subsyncr.core.models import SyncJob, SyncOptions, default_output_for
 from subsyncr.core.planner import build_job
-
-MEDIA_FILTER = (
-    "Media files (*.mkv *.mp4 *.avi *.mov *.m4v *.webm *.ts *.m2ts *.mpg *.mpeg "
-    "*.flac *.wav *.mka *.mp3);;Subtitle reference (*.srt *.ass *.ssa *.sub);;"
-    "Serialized speech (*.npz *.npy);;All files (*)"
-)
-SUBTITLE_FILTER = "Subtitle files (*.srt *.ass *.ssa *.sub *.vtt);;All files (*)"
-
-
-class _FilePicker(QWidget):
-    def __init__(
-        self, file_filter: str, on_change=None, parent: QWidget | None = None
-    ) -> None:
-        super().__init__(parent)
-        self._filter = file_filter
-        self._on_change = on_change
-        self.edit = QLineEdit(self)
-        if on_change is not None:
-            self.edit.textChanged.connect(lambda _: on_change())
-        button = QPushButton("Browse...", self)
-        button.clicked.connect(self._browse)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.edit, 1)
-        layout.addWidget(button)
-
-    def text(self) -> str:
-        return self.edit.text().strip()
-
-    def set_text(self, value: str) -> None:
-        self.edit.setText(value)
-
-    @Slot()
-    def _browse(self) -> None:
-        selected, _ = QFileDialog.getOpenFileName(
-            self, "Select file", self.text(), self._filter
-        )
-        if selected:
-            self.set_text(selected)
+from subsyncr.qt.sizing import SIZE_ADD_JOB, SPACING
+from subsyncr.qt.widgets import MEDIA_FILTER, SUBTITLE_FILTER, PathField
 
 
 class AddJobDialog(QDialog):
@@ -74,13 +34,23 @@ class AddJobDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Add job")
-        self.resize(640, 240)
+        self.resize(*SIZE_ADD_JOB)
         self._options = options
         self._output_suffix = output_suffix
         self._output_edited = False
 
-        self.reference = _FilePicker(MEDIA_FILTER, self._validate, self)
-        self.subtitle = _FilePicker(SUBTITLE_FILTER, self._subtitle_changed, self)
+        self.reference = PathField(
+            file_filter=MEDIA_FILTER,
+            caption="Select the reference",
+            on_change=self._validate,
+            parent=self,
+        )
+        self.subtitle = PathField(
+            file_filter=SUBTITLE_FILTER,
+            caption="Select the subtitle",
+            on_change=self._subtitle_changed,
+            parent=self,
+        )
         self.output = QLineEdit(self)
         self.output.textEdited.connect(self._mark_output_edited)
         self.overwrite = QCheckBox("Write over the input subtitle", self)
@@ -123,6 +93,7 @@ class AddJobDialog(QDialog):
         form.addRow("", self.fast_mode)
 
         layout = QVBoxLayout(self)
+        layout.setSpacing(SPACING)
         layout.addLayout(form)
         layout.addWidget(self.hint)
         layout.addStretch(1)

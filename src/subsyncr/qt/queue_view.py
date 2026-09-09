@@ -8,21 +8,27 @@ from PySide6.QtCore import (
     QObject,
     QPersistentModelIndex,
     Qt,
+    Slot,
 )
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableView, QWidget
+from PySide6.QtGui import QIcon, QPainter
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QHeaderView,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionProgressBar,
+    QStyleOptionViewItem,
+    QTableView,
+    QWidget,
+)
 
 from subsyncr.core.models import JobStatus, SyncJob
 from subsyncr.core.queue import SyncQueue
-
-_STATUS_COLORS = {
-    JobStatus.QUEUED: QColor("#6b7280"),
-    JobStatus.RUNNING: QColor("#2563eb"),
-    JobStatus.SUCCEEDED: QColor("#15803d"),
-    JobStatus.FAILED: QColor("#b91c1c"),
-    JobStatus.CANCELLED: QColor("#78716c"),
-    JobStatus.SKIPPED_LOW_QUALITY: QColor("#b45309"),
-}
+from subsyncr.qt.icons import STATUS_ICONS
+from subsyncr.qt.palette import status_color
+from subsyncr.qt.theme import ThemeManager
+from subsyncr.qt.widgets import enable_row_stripes
 
 _STATUS_LABELS = {
     JobStatus.QUEUED: "Queued",
@@ -32,6 +38,16 @@ _STATUS_LABELS = {
     JobStatus.CANCELLED: "Cancelled",
     JobStatus.SKIPPED_LOW_QUALITY: "Low quality",
 }
+
+#: The raw 0..1 fraction, for the delegate. DisplayRole stays human-readable.
+ROLE_PROGRESS = Qt.ItemDataRole.UserRole + 1
+
+# QStyleOptionProgressBar is integer-valued; this is just the resolution the
+# fraction is quantised to.
+_PROGRESS_STEPS = 1000
+
+# Room either side of the elided label so it does not touch the bar's border.
+_PROGRESS_TEXT_PADDING = 8
 
 COLUMN_RUN = 0
 COLUMN_STATUS = 1
@@ -60,6 +76,34 @@ class JobTableModel(QAbstractTableModel):
         self._queue = queue
         self._jobs: list[SyncJob] = queue.snapshot()
         self._rows: dict[str, int] = {job.id: i for i, job in enumerate(self._jobs)}
+        # Status icons are tinted for one colour scheme, so they are cached
+        # until the theme says otherwise rather than rebuilt per paint.
+        self._icons: dict[JobStatus, QIcon] = {}
+        self._theme = ThemeManager.for_app()
+        if self._theme is not None:
+            self._theme.changed.connect(self._theme_changed)
+
+    @Slot()
+    def _theme_changed(self) -> None:
+        self._icons.clear()
+        if self._jobs:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(len(self._jobs) - 1, self.columnCount() - 1),
+            )
+
+    def _status_icon(self, status: JobStatus) -> QIcon | None:
+        if self._theme is None:
+            return None
+        cached = self._icons.get(status)
+        if cached is None:
+            icon = STATUS_ICONS.get(status)
+            color = status_color(status)
+            if icon is None or color is None:
+                return None
+            cached = self._theme.icon(icon, color.name())
+            self._icons[status] = cached
+        return cached
 
     # -- syncing with the core -------------------------------------------
 
@@ -124,8 +168,13 @@ class JobTableModel(QAbstractTableModel):
             return self._display(job, column)
         if role == Qt.ItemDataRole.ToolTipRole:
             return self._tooltip(job, column)
+        if role == Qt.ItemDataRole.DecorationRole and column == COLUMN_STATUS:
+            return self._status_icon(job.status)
         if role == Qt.ItemDataRole.ForegroundRole and column == COLUMN_STATUS:
-            return _STATUS_COLORS.get(job.status)
+            # Resolved per paint, so a scheme change is correct on repaint.
+            return status_color(job.status)
+        if role == ROLE_PROGRESS and column == COLUMN_PROGRESS:
+            return job.progress if job.status is JobStatus.RUNNING else None
         if role == Qt.ItemDataRole.UserRole:
             return job.id
         return None
@@ -232,13 +281,62 @@ def _result_text(job: SyncJob) -> str:
     return result.error or job.last_error
 
 
+class ProgressDelegate(QStyledItemDelegate):
+    """Draws the progress column as a bar while a job is running.
+
+    Painted through the active style rather than a stylesheet, so it follows
+    the colour scheme for free.
+    """
+
+    def paint(
+        self,
+        painter: QPainter,
+        option: QStyleOptionViewItem,
+        index: QModelIndex | QPersistentModelIndex,
+    ) -> None:
+        fraction = index.data(ROLE_PROGRESS)
+        if not isinstance(fraction, float):
+            # Not running, or running with no measurable progress: the text
+            # the model supplies already says more than an empty bar would.
+            super().paint(painter, option, index)
+            return
+
+        # Let the style paint selection and alternating-row background first.
+        self.initStyleOption(option, index)
+        option.text = ""
+        style = option.widget.style() if option.widget else QApplication.style()
+        style.drawControl(
+            QStyle.ControlElement.CE_ItemViewItem, option, painter, option.widget
+        )
+
+        bar = QStyleOptionProgressBar()
+        bar.rect = option.rect.adjusted(4, 4, -4, -4)
+        bar.minimum = 0
+        bar.maximum = _PROGRESS_STEPS
+        bar.progress = round(fraction * _PROGRESS_STEPS)
+        # A progress bar wraps its text rather than eliding it, and the stage
+        # name is easily wider than the column, so elide it here.
+        bar.text = option.fontMetrics.elidedText(
+            str(index.data(Qt.ItemDataRole.DisplayRole) or ""),
+            Qt.TextElideMode.ElideRight,
+            bar.rect.width() - _PROGRESS_TEXT_PADDING,
+        )
+        bar.textVisible = True
+        bar.textAlignment = Qt.AlignmentFlag.AlignCenter
+        bar.state = option.state
+        style.drawControl(
+            QStyle.ControlElement.CE_ProgressBar, bar, painter, option.widget
+        )
+
+
 class JobTableView(QTableView):
     def __init__(self, model: JobTableModel, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setModel(model)
+        self.setItemDelegateForColumn(COLUMN_PROGRESS, ProgressDelegate(self))
         self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.setAlternatingRowColors(True)
+        enable_row_stripes(self)
         self.setSortingEnabled(False)
         self.setWordWrap(False)
         self.verticalHeader().setVisible(False)

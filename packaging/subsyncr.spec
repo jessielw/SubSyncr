@@ -40,6 +40,8 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="SubSyncr",
+    # Regenerated from the embedded mark by packaging/make_icon.py.
+    icon=str(root / "packaging" / "icons" / "subsyncr.ico"),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

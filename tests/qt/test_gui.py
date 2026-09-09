@@ -12,6 +12,8 @@ from pathlib import Path
 import threading
 
 from PySide6.QtCore import QSettings, Qt
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QMenu, QWidget
 import pytest
 
 from subsyncr.core.config import Theme
@@ -27,6 +29,7 @@ from subsyncr.qt.queue_view import (
     COLUMN_RUN,
     COLUMN_STATUS,
     COLUMN_SUBTITLE,
+    ROLE_PROGRESS,
     JobTableModel,
 )
 from subsyncr.qt.settings_view import SettingsDialog
@@ -166,7 +169,7 @@ def test_match_dialog_builds_grouped_jobs(
     dialog = BatchMatchDialog(window.config.sync, parent=window)
     qtbot.addWidget(dialog)
     dialog.video_folder.set_text(str(folder))
-    dialog._scan()
+    dialog.scan()
 
     assert dialog.table.rowCount() == 3
     jobs = dialog.jobs()
@@ -182,7 +185,7 @@ def test_match_dialog_excludes_deselected_rows(
     dialog = BatchMatchDialog(window.config.sync, parent=window)
     qtbot.addWidget(dialog)
     dialog.video_folder.set_text(str(folder))
-    dialog._scan()
+    dialog.scan()
     assert len(dialog.jobs()) == 1
     dialog._set_include_all(False)
     assert dialog.jobs() == []
@@ -195,7 +198,7 @@ def test_match_dialog_cannot_queue_an_unmatched_video(
     dialog = BatchMatchDialog(window.config.sync, parent=window)
     qtbot.addWidget(dialog)
     dialog.video_folder.set_text(str(folder))
-    dialog._scan()
+    dialog.scan()
     assert dialog.jobs() == []
     assert dialog._ok_button.isEnabled() is False
 
@@ -322,7 +325,7 @@ def test_fast_mode_applies_to_the_batch_only(
     dialog = BatchMatchDialog(window.config.sync, parent=window)
     qtbot.addWidget(dialog)
     dialog.video_folder.set_text(str(folder))
-    dialog._scan()
+    dialog.scan()
 
     assert dialog.jobs()[0].options.ffsubsync.multi_segment_sync is False
     dialog.fast_mode.setChecked(True)
@@ -437,3 +440,103 @@ def test_backup_checkbox_follows_overwrite(qtbot, window: MainWindow) -> None:
     dialog.overwrite.setChecked(True)
     assert dialog.backup.isEnabled() is True
     assert dialog.backup.isChecked() is True
+
+
+def test_toolbar_actions_all_carry_an_icon_and_a_tip(window: MainWindow) -> None:
+    """Every one of these was a mismatched QStyle.StandardPixmap with no
+    tooltip; two of them drew near-identical glyphs side by side."""
+    actions = (
+        window.match_action,
+        window.add_action,
+        window.remove_action,
+        window.retry_action,
+        window.clear_action,
+        window.start_action,
+        window.stop_action,
+        window.cancel_action,
+        window.history_action,
+        window.settings_action,
+    )
+    for action in actions:
+        assert not action.icon().isNull(), action.text()
+        assert action.toolTip(), action.text()
+        assert action.statusTip(), action.text()
+
+
+def test_menu_bar_reuses_the_toolbar_actions(window: MainWindow) -> None:
+    """Sharing the objects is what keeps enabled state in one place."""
+    titles = [menu.title() for menu in window.menuBar().findChildren(QMenu)]
+    assert titles == ["&File", "&Queue", "&Tools", "&Help"]
+    queue_menu = next(
+        menu
+        for menu in window.menuBar().findChildren(QMenu)
+        if menu.title() == "&Queue"
+    )
+    assert window.start_action in queue_menu.actions()
+
+
+def test_no_widget_in_the_window_sets_a_stylesheet(window: MainWindow) -> None:
+    """Under Fusion a QSS makes a container's children resolve colours from
+    the stylesheet defaults rather than the palette, which inverts enabled
+    and disabled text."""
+    assert not window.styleSheet()
+    for widget in window.findChildren(QWidget):
+        assert not widget.styleSheet(), widget.objectName() or widget
+
+
+def test_splitter_position_survives_a_restart() -> None:
+    """QMainWindow.saveState does not cover the central widget, so the log
+    pane used to reset on every launch.
+
+    Both windows are owned outright rather than taken from the fixture: this
+    has to close one for real, and closing twice would tear the store down
+    twice.
+    """
+    settings = QSettings("SubSyncr-tests", "splitter")
+    settings.clear()
+
+    first = MainWindow(settings=settings)
+    first.resize(1000, 800)
+    first.splitter.setSizes([700, 100])
+    saved = first.splitter.sizes()
+    first.close()
+
+    second = MainWindow(settings=settings)
+    try:
+        assert second.splitter.sizes() == saved
+    finally:
+        second.close()
+        settings.clear()
+
+
+def test_status_column_offers_an_icon(
+    window: MainWindow, make_job: Callable[..., SyncJob]
+) -> None:
+    window.queue.add([make_job("Show.S01E01")])
+    model = window.model
+    icon = model.data(model.index(0, COLUMN_STATUS), Qt.ItemDataRole.DecorationRole)
+    assert isinstance(icon, QIcon)
+    assert not icon.isNull()
+
+
+def test_progress_role_is_only_set_while_running(
+    window: MainWindow, make_job: Callable[..., SyncJob]
+) -> None:
+    job = make_job("Show.S01E01")
+    window.queue.add([job])
+    model = window.model
+    index = model.index(0, COLUMN_PROGRESS)
+    assert model.data(index, ROLE_PROGRESS) is None
+
+    job.status = JobStatus.RUNNING
+    job.progress = 0.5
+    assert model.data(index, ROLE_PROGRESS) == 0.5
+
+
+def test_settings_keeps_fast_mode_it_does_not_edit(qtbot, window: MainWindow) -> None:
+    """The dialog has no fast-mode control, so it has to carry the saved
+    value through rather than let the default overwrite it."""
+    window.config.fast_mode = True
+    dialog = SettingsDialog(window.config, parent=window)
+    qtbot.addWidget(dialog)
+    assert dialog.config().fast_mode is True

@@ -7,28 +7,38 @@ import contextlib
 from pathlib import Path
 import time
 
-from PySide6.QtCore import QByteArray, QSettings, QSize, Qt, Slot
+from PySide6.QtCore import QByteArray, QPoint, QSettings, QSize, Qt, QUrl, Slot
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
+    QDesktopServices,
     QDragEnterEvent,
     QDragMoveEvent,
     QDropEvent,
+    QKeySequence,
 )
 from PySide6.QtWidgets import (
     QDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QSplitter,
-    QStyle,
     QToolBar,
     QWidget,
 )
 
-from subsyncr.core.config import AppConfig, database_path, speech_cache_dir
-from subsyncr.core.ffmpeg import probe
+from subsyncr import __version__
+from subsyncr.core import engines
+from subsyncr.core.config import (
+    AppConfig,
+    cache_dir,
+    config_path,
+    data_dir,
+    database_path,
+    speech_cache_dir,
+)
 from subsyncr.core.models import JobStatus, SyncJob
 from subsyncr.core.queue import QueueCounts, SyncQueue
 from subsyncr.core.scanner import MEDIA_EXTENSIONS, SUBTITLE_EXTENSIONS
@@ -37,10 +47,18 @@ from subsyncr.core.store import JobStore
 from subsyncr.qt.add_job import AddJobDialog
 from subsyncr.qt.bridge import QueueBridge
 from subsyncr.qt.history_view import HistoryDialog
+from subsyncr.qt.icons import Icon
 from subsyncr.qt.match_view import BatchMatchDialog
 from subsyncr.qt.queue_view import COLUMN_PROGRESS, JobTableModel, JobTableView
 from subsyncr.qt.settings_view import SettingsDialog
-from subsyncr.qt.theme import apply_theme
+from subsyncr.qt.sizing import (
+    ICON_SIZE,
+    SIZE_MAIN_MINIMUM,
+    SIZE_MAIN_WINDOW,
+    SPACING,
+)
+from subsyncr.qt.theme import ThemeManager, apply_theme
+from subsyncr.qt.widgets import FFmpegStatusLabel
 
 _MAX_LOG_BLOCKS = 5000
 
@@ -69,35 +87,43 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("SubSyncr")
         self.setAcceptDrops(True)
-        self.setMinimumSize(960, 600)
-        self.resize(1240, 760)
+        self.setMinimumSize(*SIZE_MAIN_MINIMUM)
+        self.resize(*SIZE_MAIN_WINDOW)
+        self.theme = ThemeManager.for_app()
 
         self.model = JobTableModel(self.queue, self)
         self.table = JobTableView(self.model, self)
         self.table.selectionModel().selectionChanged.connect(self._update_actions)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_table_menu)
 
         self.log = QPlainTextEdit(self)
         self.log.setReadOnly(True)
         self.log.setPlaceholderText("ffsubsync output appears here while jobs run.")
         self.log.document().setMaximumBlockCount(_MAX_LOG_BLOCKS)
 
-        splitter = QSplitter(Qt.Orientation.Vertical, self)
-        splitter.addWidget(self.table)
-        splitter.addWidget(self.log)
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 1)
-        self.setCentralWidget(splitter)
+        self.splitter = QSplitter(Qt.Orientation.Vertical, self)
+        self.splitter.setObjectName("mainSplitter")
+        self.splitter.addWidget(self.table)
+        self.splitter.addWidget(self.log)
+        self.splitter.setStretchFactor(0, 4)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setHandleWidth(SPACING)
+        self.setCentralWidget(self.splitter)
 
         self.queue_label = QLabel(self)
-        self.ffmpeg_label = QLabel(self)
+        # One line: the status bar has no room to wrap a long ffmpeg path.
+        self.ffmpeg_label = FFmpegStatusLabel(self, wrap=False)
         self.statusBar().addWidget(self.queue_label, 1)
         self.statusBar().addPermanentWidget(self.ffmpeg_label)
+        self.statusBar().setSizeGripEnabled(True)
 
         # Batch timing, for the estimate in the status bar.
         self._batch_started: float | None = None
         self._batch_baseline = 0
 
         self._build_toolbar()
+        self._build_menus()
         self._connect_bridge()
         self._restore_window_state()
         self._update_status()
@@ -107,63 +133,204 @@ class MainWindow(QMainWindow):
     # -- construction ----------------------------------------------------
 
     def _action(
-        self, label: str, icon: QStyle.StandardPixmap, callback: Callable[[], None]
+        self,
+        label: str,
+        icon: Icon,
+        callback: Callable[[], object],
+        *,
+        tip: str,
+        shortcut: QKeySequence.StandardKey | str | None = None,
     ) -> QAction:
-        action = QAction(self.style().standardIcon(icon), label, self)
+        action = QAction(label, self)
         action.triggered.connect(callback)
+        action.setToolTip(tip)
+        # Shown in the status bar on hover, so the toolbar itself stays terse.
+        action.setStatusTip(tip)
+        if shortcut is not None:
+            action.setShortcut(shortcut)
+        if self.theme is not None:
+            self.theme.register(action, icon)
         return action
 
     def _build_toolbar(self) -> None:
         toolbar = QToolBar("Queue", self)
         toolbar.setObjectName("queueToolbar")
-        toolbar.setIconSize(QSize(18, 18))
+        toolbar.setIconSize(QSize(ICON_SIZE, ICON_SIZE))
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        pixmap = QStyle.StandardPixmap
         self.match_action = self._action(
-            "Match folders", pixmap.SP_DirOpenIcon, self._match_folders
+            "Match folders",
+            Icon.MATCH,
+            self._match_folders,
+            tip="Scan a video folder and a subtitle folder, and review the pairings",
+            shortcut=QKeySequence.StandardKey.Open,
         )
         self.add_action = self._action(
-            "Add job", pixmap.SP_FileDialogNewFolder, self._add_job
+            "Add job",
+            Icon.ADD,
+            self._add_job,
+            tip="Queue a single reference and subtitle pair",
+            shortcut=QKeySequence.StandardKey.New,
         )
         self.remove_action = self._action(
-            "Remove", pixmap.SP_TrashIcon, self._remove_selected
+            "Remove",
+            Icon.REMOVE,
+            self._remove_selected,
+            tip="Remove the selected jobs from the queue",
+            shortcut=QKeySequence.StandardKey.Delete,
         )
         self.retry_action = self._action(
-            "Retry", pixmap.SP_BrowserReload, self._retry_selected
+            "Retry",
+            Icon.RETRY,
+            self._retry_selected,
+            tip="Queue the selected failed, cancelled or low-quality jobs again",
+            shortcut="Ctrl+R",
         )
         self.clear_action = self._action(
-            "Clear finished", pixmap.SP_DialogDiscardButton, self._clear_finished
+            "Clear finished",
+            Icon.CLEAR,
+            self._clear_finished,
+            tip="Remove every job that has finished, however it ended",
         )
         self.start_action = self._action(
-            "Start queue", pixmap.SP_MediaPlay, self.queue.start
+            "Start queue",
+            Icon.START,
+            self.queue.start,
+            tip="Start working through the queued jobs",
+            shortcut="Ctrl+Return",
         )
         self.stop_action = self._action(
-            "Stop after current", pixmap.SP_MediaPause, self.queue.stop
+            "Stop after current",
+            Icon.STOP,
+            self.queue.stop,
+            tip="Let the running jobs finish, then stop",
+            shortcut="Ctrl+.",
         )
         self.cancel_action = self._action(
-            "Cancel running", pixmap.SP_MediaStop, self._cancel_selected
+            "Cancel running",
+            Icon.CANCEL,
+            self._cancel_selected,
+            tip="Cancel the selected running jobs, or all of them if none is selected",
         )
         self.history_action = self._action(
-            "History", pixmap.SP_FileDialogContentsView, self._show_history
+            "History",
+            Icon.HISTORY,
+            self._show_history,
+            tip="Search finished jobs and queue them again",
+            shortcut="Ctrl+H",
         )
         self.settings_action = self._action(
-            "Settings", pixmap.SP_FileDialogDetailedView, self._show_settings
+            "Settings",
+            Icon.SETTINGS,
+            self._show_settings,
+            tip="Engines, concurrency, matching and file handling",
+            shortcut=QKeySequence.StandardKey.Preferences,
+        )
+        self.about_action = self._action(
+            "About SubSyncr",
+            Icon.ABOUT,
+            self._show_about,
+            tip="Version, engines and where things are stored",
+        )
+        self.quit_action = self._action(
+            "Quit",
+            Icon.QUIT,
+            self.close,
+            tip="Close SubSyncr",
+            shortcut=QKeySequence.StandardKey.Quit,
+        )
+        self.open_folder_action = self._action(
+            "Open containing folder",
+            Icon.OPEN_FOLDER,
+            self._open_containing_folder,
+            tip="Show the selected job's output folder in the file manager",
         )
 
-        for action in (self.match_action, self.add_action):
-            toolbar.addAction(action)
-        toolbar.addSeparator()
-        for action in (self.remove_action, self.retry_action, self.clear_action):
-            toolbar.addAction(action)
-        toolbar.addSeparator()
-        for action in (self.start_action, self.stop_action, self.cancel_action):
-            toolbar.addAction(action)
-        toolbar.addSeparator()
-        for action in (self.history_action, self.settings_action):
-            toolbar.addAction(action)
+        for group in (
+            (self.match_action, self.add_action),
+            (self.remove_action, self.retry_action, self.clear_action),
+            (self.start_action, self.stop_action, self.cancel_action),
+            (self.history_action, self.settings_action),
+        ):
+            if toolbar.actions():
+                toolbar.addSeparator()
+            for action in group:
+                toolbar.addAction(action)
+
+    def _build_menus(self) -> None:
+        """The same action objects again, so enabled state stays in one place."""
+        menus: tuple[tuple[str, tuple[QAction | None, ...]], ...] = (
+            ("&File", (self.match_action, self.add_action, None, self.quit_action)),
+            (
+                "&Queue",
+                (
+                    self.start_action,
+                    self.stop_action,
+                    self.cancel_action,
+                    None,
+                    self.retry_action,
+                    self.remove_action,
+                    self.clear_action,
+                ),
+            ),
+            ("&Tools", (self.history_action, self.settings_action)),
+            ("&Help", (self.about_action,)),
+        )
+        bar = self.menuBar()
+        for title, actions in menus:
+            menu = bar.addMenu(title)
+            for action in actions:
+                if action is None:
+                    menu.addSeparator()
+                else:
+                    menu.addAction(action)
+
+    @Slot(QPoint)
+    def _show_table_menu(self, position: QPoint) -> None:
+        menu = QMenu(self.table)
+        for action in (
+            self.start_action,
+            self.cancel_action,
+            None,
+            self.retry_action,
+            self.remove_action,
+            None,
+            self.open_folder_action,
+        ):
+            if action is None:
+                menu.addSeparator()
+            else:
+                menu.addAction(action)
+        menu.exec(self.table.viewport().mapToGlobal(position))
+
+    @Slot()
+    def _open_containing_folder(self) -> None:
+        jobs = self.model.jobs_for_rows(self.table.selected_rows())
+        if not jobs:
+            return
+        # The output is what there is to look at once a job is done, and it
+        # sits beside the input before then.
+        QDesktopServices.openUrl(
+            QUrl.fromLocalFile(str(jobs[0].effective_output.parent))
+        )
+
+    @Slot()
+    def _show_about(self) -> None:
+        names = ", ".join(spec.label for spec in engines.all_specs())
+        QMessageBox.about(
+            self,
+            "About SubSyncr",
+            f"<h3>SubSyncr {__version__}</h3>"
+            "<p>A review-first batch queue for subtitle synchronization.</p>"
+            f"<p><b>Engines</b><br>{names}</p>"
+            "<p><b>Where things are stored</b><br>"
+            f"Settings: {config_path()}<br>"
+            f"Queue and history: {database_path()}<br>"
+            f"Data: {data_dir()}<br>"
+            f"Cache: {cache_dir()}</p>",
+        )
 
     def _connect_bridge(self) -> None:
         self.bridge.queue_changed.connect(self._queue_changed)
@@ -305,7 +472,7 @@ class MainWindow(QMainWindow):
             video_folder=video_folder, subtitle_folder=subtitle_folder
         )
         if video_folder:
-            dialog._scan()
+            dialog.scan()
         self._run_match_dialog(dialog)
 
     def _build_add_job_dialog(
@@ -431,6 +598,7 @@ class MainWindow(QMainWindow):
         self.clear_action.setEnabled(
             any(job.status.is_terminal for job in self.queue.snapshot())
         )
+        self.open_folder_action.setEnabled(bool(selected))
 
     def _update_status(self) -> None:
         counts = self.queue.counts()
@@ -464,21 +632,22 @@ class MainWindow(QMainWindow):
         return f"~{seconds / 60:.0f} min left"
 
     def _update_ffmpeg_status(self) -> None:
-        status = probe(self.config.sync.environment.ffmpeg_path)
-        self.ffmpeg_label.setText(status.message)
-        self.ffmpeg_label.setStyleSheet(
-            "color: #15803d;" if status.ready else "color: #b45309;"
-        )
+        self.ffmpeg_label.refresh(self.config.sync.environment.ffmpeg_path)
 
     # -- lifecycle -------------------------------------------------------
 
     def _restore_window_state(self) -> None:
         geometry = self.settings.value("window/geometry")
         state = self.settings.value("window/state")
+        splitter = self.settings.value("window/splitter")
         if isinstance(geometry, QByteArray):
             self.restoreGeometry(geometry)
         if isinstance(state, QByteArray):
             self.restoreState(state)
+        # QMainWindow.saveState covers toolbars and docks, not the central
+        # widget, so the log pane would otherwise reset on every launch.
+        if isinstance(splitter, QByteArray):
+            self.splitter.restoreState(splitter)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self.queue.is_running:
@@ -492,6 +661,7 @@ class MainWindow(QMainWindow):
                 return
         self.settings.setValue("window/geometry", self.saveGeometry())
         self.settings.setValue("window/state", self.saveState())
+        self.settings.setValue("window/splitter", self.splitter.saveState())
         # Stop callbacks before tearing down, so no signal reaches a dead widget.
         self.bridge.detach()
         self.queue.shutdown()

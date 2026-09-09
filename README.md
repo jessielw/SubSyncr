@@ -29,6 +29,9 @@ fills, so the interesting part here is the **matching and review**, not the sync
 - **Drag and drop.** Drop folders, or a full set of files, on the window to
   open a pre-filled review; drop a single video or a single subtitle and
   Add job opens with that file already filled in.
+- **Light and dark, following the OS** or pinned in Settings, with icons and
+  status colours that re-tint live rather than staying stuck at whatever the
+  scheme was on launch.
 - **A backup before any in-place overwrite**, and an existing `.bak` is never
   replaced, so re-running cannot bury the true original.
 - **A headless CLI** over the same core, for scripted batches.
@@ -115,6 +118,26 @@ arrays are tiny — 8 videos came to 12 KB.
 Concurrency defaults to half the logical cores, capped at four. Raise or lower it
 in Settings; on a spinning disk fewer parallel reads may well be faster.
 
+### Theming, without a stylesheet
+
+Light/dark is Qt's own `QStyleHints.setColorScheme()` on top of the Fusion
+style, so Qt repaints every standard widget itself and tracks the OS setting
+live when the choice is *Automatic*.
+
+No stylesheet is set anywhere, deliberately: under Fusion a QSS on a container
+makes its children resolve colours from the stylesheet defaults rather than the
+palette, which inverts enabled and disabled text. `tests/qt/test_widgets.py`
+and `test_gui.py` assert that no widget carries one.
+
+That leaves the colours Qt cannot know about. Icons are Phosphor glyphs from
+qtawesome, rendered at a fixed colour, so `qt/theme.py`'s `ThemeManager` keeps a
+weak registry of every icon owner and re-tints them from `QPalette.WindowText`
+whenever the scheme changes — guarded with `shiboken6.isValid`, because a PySide
+wrapper can outlive its C++ object. Semantic colours (`qt/palette.py`) come in
+light/dark pairs and are resolved per paint. Qt's dark scheme also derives
+`AlternateBase` from the Windows accent colour, which lands on a navy that reads
+as a selected row, so row stripes are computed from `Base` instead.
+
 ### Fast mode
 
 Fast mode is `--multi-segment-sync`: ffsubsync samples a handful of short
@@ -161,6 +184,11 @@ The onedir bundle lands in `dist/SubSyncr`. The executable wears three hats and
 dispatches on its first argument: `--sync-worker` for the child process, a
 subcommand for the CLI, and anything else for the GUI. ffmpeg is deliberately not
 bundled.
+
+The window and executable icons are rendered from the mark embedded in
+`qt/icons.py`, so nothing has to be found on disk at runtime. After changing the
+artwork, regenerate the `.ico` PyInstaller needs at build time with
+`uv run python packaging/make_icon.py`.
 
 ## Where things are stored
 
