@@ -24,5 +24,9 @@ ICON_SIZE = 18
 #: Icons that sit inside a row of controls, next to a line edit.
 INLINE_ICON_SIZE = 16
 
+#: Splitter handles. Wider than the spacing step because the handle has to
+#: hold a grip and still be an easy target for the mouse.
+SPLITTER_HANDLE = 12
+
 #: The engine fallback list is a picker, not a document; it should not grow.
 FALLBACK_LIST_HEIGHT = 110

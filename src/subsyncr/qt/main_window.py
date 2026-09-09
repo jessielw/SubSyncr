@@ -7,7 +7,7 @@ import contextlib
 from pathlib import Path
 import time
 
-from PySide6.QtCore import QByteArray, QPoint, QSettings, QSize, Qt, QUrl, Slot
+from PySide6.QtCore import QByteArray, QPoint, QSettings, QSize, Qt, QTimer, QUrl, Slot
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
-    QSplitter,
     QToolBar,
     QWidget,
 )
@@ -55,8 +54,8 @@ from subsyncr.qt.sizing import (
     ICON_SIZE,
     SIZE_MAIN_MINIMUM,
     SIZE_MAIN_WINDOW,
-    SPACING,
 )
+from subsyncr.qt.splitter import GripSplitter
 from subsyncr.qt.theme import ThemeManager, apply_theme
 from subsyncr.qt.widgets import FFmpegStatusLabel
 
@@ -102,13 +101,12 @@ class MainWindow(QMainWindow):
         self.log.setPlaceholderText("Engine output appears here while jobs run.")
         self.log.document().setMaximumBlockCount(_MAX_LOG_BLOCKS)
 
-        self.splitter = QSplitter(Qt.Orientation.Vertical, self)
+        self.splitter = GripSplitter(Qt.Orientation.Vertical, self)
         self.splitter.setObjectName("mainSplitter")
         self.splitter.addWidget(self.table)
         self.splitter.addWidget(self.log)
         self.splitter.setStretchFactor(0, 4)
         self.splitter.setStretchFactor(1, 1)
-        self.splitter.setHandleWidth(SPACING)
         self.setCentralWidget(self.splitter)
 
         self.queue_label = QLabel(self)
@@ -393,6 +391,15 @@ class MainWindow(QMainWindow):
         if not paths:
             return
         event.acceptProposedAction()
+        # On Windows the drop arrives inside the OS drag-and-drop loop
+        # (OLE's DoDragDrop), which blocks Explorer's UI thread until this
+        # handler returns. Opening a modal dialog here nests a second event
+        # loop inside that call and leaves Explorer stuck until the dialog
+        # closes, so defer the actual handling to the next event loop tick,
+        # once control has returned to the drag source.
+        QTimer.singleShot(0, lambda: self._handle_dropped_paths(paths))
+
+    def _handle_dropped_paths(self, paths: list[Path]) -> None:
         folders = [path for path in paths if path.is_dir()]
         files = [path for path in paths if path.is_file()]
         if folders:
