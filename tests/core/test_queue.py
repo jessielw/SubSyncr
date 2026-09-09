@@ -150,6 +150,9 @@ def test_retry_requeues_only_retryable_jobs(
     job = make_job("A")
     queue.add([job])
     _drain(queue)
+    # Stop first: a still-draining queue claims the requeued job immediately,
+    # so QUEUED would be a race rather than the state under test.
+    queue.stop()
     assert queue.retry([job.id]) == 1
     assert queue.find(job.id).status is JobStatus.QUEUED  # type: ignore[union-attr]
     # A succeeded job is not retryable through this path.

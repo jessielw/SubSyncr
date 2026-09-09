@@ -297,7 +297,7 @@ class SyncQueue:
             missing = wanted - len(self._workers)
             for _ in range(max(0, missing)):
                 worker = threading.Thread(
-                    target=self._worker_loop, name="ffsubsync-worker", daemon=True
+                    target=self._worker_loop, name="subsyncr-worker", daemon=True
                 )
                 self._workers.append(worker)
                 worker.start()

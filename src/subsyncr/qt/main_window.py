@@ -99,7 +99,7 @@ class MainWindow(QMainWindow):
 
         self.log = QPlainTextEdit(self)
         self.log.setReadOnly(True)
-        self.log.setPlaceholderText("ffsubsync output appears here while jobs run.")
+        self.log.setPlaceholderText("Engine output appears here while jobs run.")
         self.log.document().setMaximumBlockCount(_MAX_LOG_BLOCKS)
 
         self.splitter = QSplitter(Qt.Orientation.Vertical, self)

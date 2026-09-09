@@ -51,6 +51,53 @@ def test_a_byte_order_mark_is_honoured(tmp_path: Path) -> None:
     assert path.read_text(encoding=encodings.detect(path)).startswith("1")
 
 
+def test_the_utf8_fast_path_survives_a_sliced_character(tmp_path: Path) -> None:
+    """Detection samples a fixed number of bytes, which cuts a character in half.
+
+    Any subtitle past that size hits this, and a feature-length CJK .srt is
+    well past it. Rejecting the sliced tail would drop a plainly UTF-8 file
+    into statistical detection for no reason.
+    """
+    unit = "1\n00:00:01,000 --> 00:00:03,000\n這是一個中文字幕。\n\n"
+    for shift in range(4):
+        # One of these four offsets puts the cut mid-character; all must agree.
+        path = tmp_path / f"long{shift}.srt"
+        path.write_bytes(b"\n" * shift + (unit * 3000).encode("utf-8"))
+        assert path.stat().st_size > encodings._SAMPLE_BYTES
+        assert encodings.detect(path) == "utf-8"
+
+
+def test_detection_samples_the_head_rather_than_the_whole_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 30 MB subtitle must not cost 30 MB of reading to characterise."""
+    path = tmp_path / "big.srt"
+    path.write_bytes(b"a" * (encodings._SAMPLE_BYTES * 4))
+    sizes: list[int] = []
+    real_open = Path.open
+
+    def spy(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        handle = real_open(self, *args, **kwargs)
+        if self == path:
+            real_read = handle.read
+
+            def counted(size=-1):  # type: ignore[no-untyped-def]
+                data = real_read(size)
+                sizes.append(len(data))
+                return data
+
+            handle.read = counted  # type: ignore[method-assign]
+        return handle
+
+    encodings._detect.cache_clear()
+    monkeypatch.setattr(Path, "open", spy)
+    try:
+        assert encodings.detect(path) == "utf-8"
+    finally:
+        encodings._detect.cache_clear()
+    assert sizes and max(sizes) <= encodings._SAMPLE_BYTES
+
+
 def test_a_legacy_cyrillic_subtitle_is_not_read_as_utf8(tmp_path: Path) -> None:
     """The case that turns dialogue into mojibake if we guess wrong."""
     path = tmp_path / "ru.srt"

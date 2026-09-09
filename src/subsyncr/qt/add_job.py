@@ -22,6 +22,10 @@ from subsyncr.core.planner import build_job
 from subsyncr.qt.sizing import SIZE_ADD_JOB, SPACING
 from subsyncr.qt.widgets import MEDIA_FILTER, SUBTITLE_FILTER, PathField
 
+# The .sub format is read but never written back: resolve_output redirects it,
+# whichever engine runs. Named so _validate can tell it from a real problem.
+_SUB_FORMAT_NOTE = "The .sub format cannot be written; the output will be .srt."
+
 
 class AddJobDialog(QDialog):
     def __init__(
@@ -132,11 +136,10 @@ class AddJobDialog(QDialog):
         if not self.overwrite.isChecked() and not self.output.text().strip():
             problems.append("Choose an output path.")
         if subtitle is not None and subtitle.suffix.casefold() == ".sub":
-            problems.append(
-                "ffsubsync cannot write the .sub format; the output will be .srt."
-            )
+            # Advice, not an obstacle: the job still runs, it just lands as .srt.
+            problems.append(_SUB_FORMAT_NOTE)
         self.hint.setText(" ".join(problems))
-        blocking = [p for p in problems if not p.startswith("ffsubsync cannot write")]
+        blocking = [p for p in problems if p != _SUB_FORMAT_NOTE]
         self._ok.setEnabled(not blocking)
 
     def job(self) -> SyncJob:

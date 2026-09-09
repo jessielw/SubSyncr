@@ -108,6 +108,23 @@ def test_previously_synced_output_is_not_offered_as_input(media_tree: Tree) -> N
     assert names == {"Show.S01E01.en.srt"}
 
 
+def test_a_custom_output_suffix_is_also_skipped_on_rescan(media_tree: Tree) -> None:
+    """The suffix is a setting, so the built-in marker alone is not enough.
+
+    Someone who set it to ".fixed" would otherwise see last run's results
+    offered back as fresh input on the next scan.
+    """
+    folder = media_tree(
+        ["Show.S01E01.mkv", "Show.S01E01.en.srt", "Show.S01E01.en.fixed.srt"]
+    )
+    assert {p.name for p in scan_subtitles(folder)} == {
+        "Show.S01E01.en.srt",
+        "Show.S01E01.en.fixed.srt",
+    }
+    names = {p.name for p in scan_subtitles(folder, output_suffix=".fixed")}
+    assert names == {"Show.S01E01.en.srt"}
+
+
 def test_fuzzy_match_flags_a_close_runner_up(media_tree: Tree) -> None:
     folder = media_tree(
         [

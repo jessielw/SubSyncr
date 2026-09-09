@@ -54,11 +54,17 @@ def _collect(
     *,
     recursive: bool,
     subtitles_as_reference: bool = False,
+    output_suffix: str = "",
 ) -> tuple[list[Path], list[Path]]:
     references = scan_references(
-        video_dir, subtitles_as_reference=subtitles_as_reference, recursive=recursive
+        video_dir,
+        subtitles_as_reference=subtitles_as_reference,
+        recursive=recursive,
+        output_suffix=output_suffix,
     )
-    subtitles = scan_subtitles(subtitle_dir, recursive=recursive)
+    subtitles = scan_subtitles(
+        subtitle_dir, recursive=recursive, output_suffix=output_suffix
+    )
     # A file can never be its own reference, which is easy to hit when both
     # sides are subtitles in the same tree.
     chosen = set(references)
@@ -90,6 +96,9 @@ def _apply_engine_flags(options: SyncOptions, args: argparse.Namespace) -> str |
 
 
 def command_match(args: argparse.Namespace) -> int:
+    # Only for the output suffix: a previous run's results must not be offered
+    # back as fresh input.
+    config = AppConfig.load()
     video_dir, subtitle_dir = _resolve_folders(args.video_dir, args.subtitle_dir)
     if not video_dir.is_dir():
         _error(f"not a directory: {video_dir}")
@@ -103,6 +112,7 @@ def command_match(args: argparse.Namespace) -> int:
         subtitle_dir,
         recursive=not args.no_recursive,
         subtitles_as_reference=args.subs_as_reference,
+        output_suffix=config.output_suffix,
     )
     plan = propose_matches(videos, subtitles, threshold=args.threshold)
 
@@ -254,6 +264,7 @@ def command_batch(args: argparse.Namespace) -> int:
         subtitle_dir,
         recursive=not args.no_recursive,
         subtitles_as_reference=args.subs_as_reference,
+        output_suffix=config.output_suffix,
     )
     plan = propose_matches(videos, subtitles, threshold=args.threshold)
     jobs = jobs_from_matches(

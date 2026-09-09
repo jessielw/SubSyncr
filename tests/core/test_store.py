@@ -104,6 +104,22 @@ def test_history_search_filters_by_name(
     assert len(store.history(search="")) == 2
 
 
+def test_history_search_treats_wildcards_as_text(
+    store: JobStore, make_job: Callable[..., SyncJob]
+) -> None:
+    """LIKE reads _ as "any character", and media filenames are full of them."""
+    store.record(make_job("Show_S01E01"), SyncResult(status=JobStatus.SUCCEEDED))
+    store.record(make_job("Show.S01E01"), SyncResult(status=JobStatus.SUCCEEDED))
+    store.record(make_job("100%done"), SyncResult(status=JobStatus.SUCCEEDED))
+    assert len(store.history(search="Show_S01")) == 1
+    assert len(store.history(search="Show.S01")) == 1
+    assert len(store.history(search="100%")) == 1
+    # A bare wildcard is a search for that character, not for everything.
+    assert len(store.history(search="%")) == 1
+    # Ordinary substrings still match both.
+    assert len(store.history(search="S01E01")) == 2
+
+
 def test_history_filters_by_status(
     store: JobStore, make_job: Callable[..., SyncJob]
 ) -> None:

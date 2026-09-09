@@ -46,13 +46,22 @@ SPEECH_EXTENSIONS = frozenset({".npy", ".npz"})
 
 # Outputs we produce ourselves. Re-scanning a folder must not offer them back
 # as fresh input, or a second run would sync already-synced subtitles.
+#
+# The default suffix is always recognised, even when the user has since changed
+# it: a folder synced under the old setting must not become input again.
 _GENERATED_MARKERS = (".synced",)
 
 
-def is_generated_output(path: Path) -> bool:
-    """True for files this application previously wrote."""
+def is_generated_output(path: Path, suffix: str = "") -> bool:
+    """True for files this application previously wrote.
+
+    ``suffix`` is the configured output suffix, which is why it is threaded
+    down here at all: it is user-editable, so the built-in marker alone would
+    miss the outputs of anyone who changed it.
+    """
     stem = path.stem.casefold()
-    return any(stem.endswith(marker) for marker in _GENERATED_MARKERS)
+    markers = (*_GENERATED_MARKERS, suffix.strip().casefold())
+    return any(marker and stem.endswith(marker) for marker in markers)
 
 
 def iter_files(folder: Path, *, recursive: bool) -> Iterator[Path]:
@@ -68,6 +77,7 @@ def scan_folder(
     *,
     recursive: bool = True,
     skip_generated: bool = True,
+    output_suffix: str = "",
 ) -> list[Path]:
     """Sorted list of files under ``folder`` matching ``extensions``."""
     wanted = {extension.casefold() for extension in extensions}
@@ -75,21 +85,33 @@ def scan_folder(
         path
         for path in iter_files(folder, recursive=recursive)
         if path.suffix.casefold() in wanted
-        and not (skip_generated and is_generated_output(path))
+        and not (skip_generated and is_generated_output(path, output_suffix))
     ]
     return sorted(found, key=lambda path: str(path).casefold())
 
 
-def scan_media(folder: Path, *, recursive: bool = True) -> list[Path]:
-    return scan_folder(folder, MEDIA_EXTENSIONS, recursive=recursive)
+def scan_media(
+    folder: Path, *, recursive: bool = True, output_suffix: str = ""
+) -> list[Path]:
+    return scan_folder(
+        folder, MEDIA_EXTENSIONS, recursive=recursive, output_suffix=output_suffix
+    )
 
 
-def scan_subtitles(folder: Path, *, recursive: bool = True) -> list[Path]:
-    return scan_folder(folder, SUBTITLE_EXTENSIONS, recursive=recursive)
+def scan_subtitles(
+    folder: Path, *, recursive: bool = True, output_suffix: str = ""
+) -> list[Path]:
+    return scan_folder(
+        folder, SUBTITLE_EXTENSIONS, recursive=recursive, output_suffix=output_suffix
+    )
 
 
 def scan_references(
-    folder: Path, *, subtitles_as_reference: bool = False, recursive: bool = True
+    folder: Path,
+    *,
+    subtitles_as_reference: bool = False,
+    recursive: bool = True,
+    output_suffix: str = "",
 ) -> list[Path]:
     """Files usable as a sync reference.
 
@@ -99,7 +121,9 @@ def scan_references(
     extensions = (
         SUBTITLE_REFERENCE_EXTENSIONS if subtitles_as_reference else MEDIA_EXTENSIONS
     )
-    return scan_folder(folder, extensions, recursive=recursive)
+    return scan_folder(
+        folder, extensions, recursive=recursive, output_suffix=output_suffix
+    )
 
 
 def needs_ffmpeg(reference: Path) -> bool:

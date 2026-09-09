@@ -217,8 +217,11 @@ class JobStore:
         clauses: list[str] = []
         parameters: list[Any] = []
         if search.strip():
-            clauses.append("(subtitle_path LIKE ? OR reference_path LIKE ?)")
-            pattern = f"%{search.strip()}%"
+            clauses.append(
+                "(subtitle_path LIKE ? ESCAPE '\\'"
+                " OR reference_path LIKE ? ESCAPE '\\')"
+            )
+            pattern = f"%{_like_literal(search.strip())}%"
             parameters.extend((pattern, pattern))
         if statuses:
             placeholders = ", ".join("?" for _ in statuses)
@@ -255,6 +258,17 @@ class JobStore:
             cursor = self._connection.execute("DELETE FROM history")
             self._connection.commit()
             return cursor.rowcount
+
+
+def _like_literal(text: str) -> str:
+    """Quote a search term so LIKE matches it literally.
+
+    Media filenames are full of underscores, and LIKE reads one as "any single
+    character" - so searching ``Show_S01`` would also turn up ``Show.S01``.
+    """
+    for character in ("\\", "%", "_"):
+        text = text.replace(character, "\\" + character)
+    return text
 
 
 def _job_from_row(row: sqlite3.Row) -> SyncJob:

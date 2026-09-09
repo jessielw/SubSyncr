@@ -11,6 +11,7 @@ answer into something a specific tool will accept.
 
 from __future__ import annotations
 
+import codecs
 from functools import lru_cache
 from pathlib import Path
 
@@ -33,7 +34,8 @@ def _detect(path: str, size: int, modified: int) -> str:
     """
     del size, modified
     try:
-        sample = Path(path).read_bytes()[:_SAMPLE_BYTES]
+        with Path(path).open("rb") as handle:
+            sample = handle.read(_SAMPLE_BYTES)
     except OSError:
         return FALLBACK
 
@@ -58,8 +60,17 @@ def _detect(path: str, size: int, modified: int) -> str:
 
 
 def _decodes_as(sample: bytes, codec: str) -> bool:
+    """Whether this codec reads the sample, allowing for a cut-off tail.
+
+    The sample stops at a fixed byte count, so on any file larger than that the
+    last character is usually sliced in half. Decoding the buffer outright would
+    call that a failure and hand a perfectly ordinary UTF-8 subtitle to
+    statistical detection instead - which is exactly the vote this check exists
+    to avoid. An incremental decoder left un-finalised holds the partial
+    sequence back rather than rejecting it.
+    """
     try:
-        sample.decode(codec)
+        codecs.getincrementaldecoder(codec)().decode(sample, final=False)
     except (UnicodeDecodeError, LookupError):
         return False
     return True

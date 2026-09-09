@@ -223,9 +223,14 @@ class BatchMatchDialog(QDialog):
         recursive = self.recursive.isChecked()
         subtitle_reference = self.subtitle_reference.isChecked()
         videos = scan_references(
-            video_dir, subtitles_as_reference=subtitle_reference, recursive=recursive
+            video_dir,
+            subtitles_as_reference=subtitle_reference,
+            recursive=recursive,
+            output_suffix=self._output_suffix,
         )
-        subtitles = scan_subtitles(subtitle_dir, recursive=recursive)
+        subtitles = scan_subtitles(
+            subtitle_dir, recursive=recursive, output_suffix=self._output_suffix
+        )
         if not videos:
             kind = "subtitle" if subtitle_reference else "video"
             QMessageBox.information(self, "Scan", f"No {kind} references found.")

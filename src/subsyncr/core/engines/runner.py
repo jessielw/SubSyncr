@@ -108,7 +108,7 @@ def _staging_path(output: Path) -> Path:
     cannot leave a truncated file where a good subtitle used to be - which
     matters most when the output *is* the input.
     """
-    return output.with_name(f"{output.stem}.ffsu-partial{output.suffix}")
+    return output.with_name(f"{output.stem}.subsyncr-partial{output.suffix}")
 
 
 def resolve_binary(engine: EngineId, channel: EventChannel) -> tuple[Path | None, str]:
