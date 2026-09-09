@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 import pytest
+from support import sync_options
 
 from ffsubsyncui.core.config import AppConfig
 from ffsubsyncui.core.models import SyncJob, SyncOptions, default_output_for
@@ -47,7 +48,7 @@ def store(tmp_path: Path) -> Iterator[JobStore]:
 
 @pytest.fixture
 def config() -> AppConfig:
-    return AppConfig(sync=SyncOptions(vad="auditok"), concurrency=1)
+    return AppConfig(sync=sync_options(vad="auditok"), concurrency=1)
 
 
 @pytest.fixture

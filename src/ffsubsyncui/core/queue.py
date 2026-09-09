@@ -17,7 +17,14 @@ import json
 import threading
 
 from ffsubsyncui.core.config import AppConfig
-from ffsubsyncui.core.engine import EngineError, SyncProcess, build_spec, validate
+from ffsubsyncui.core.engine import (
+    EngineError,
+    SyncProcess,
+    build_spec,
+    can_run,
+    validate,
+)
+from ffsubsyncui.core.engines import EngineId
 from ffsubsyncui.core.models import JobStatus, SyncJob, SyncResult
 from ffsubsyncui.core.scanner import needs_ffmpeg
 from ffsubsyncui.core.speech_cache import SpeechCache
@@ -77,7 +84,9 @@ def _batch_key(job: SyncJob) -> str:
     if not job.group_key:
         # No group means run alone; the job id keeps it unique.
         return f"solo:{job.id}"
-    options = json.dumps(job.options.to_dict(), sort_keys=True)
+    # Only the settings this run actually uses; an idle engine's options must
+    # not split a group.
+    options = json.dumps(job.options.identity(), sort_keys=True)
     return f"{job.group_key}|{job.reference_path}|{options}"
 
 
@@ -376,22 +385,72 @@ class SyncQueue:
         if not runnable:
             return results
 
+        # The configured engine first, then whatever the user lined up behind
+        # it. A job only moves down the chain if it failed or the engine
+        # refused to trust its own answer.
+        pending = list(runnable)
+        options = runnable[0].options
+        previous = options.engine
+        for position, engine in enumerate((options.engine, *options.fallback_chain)):
+            if not pending:
+                break
+            capable = [job for job in pending if can_run(job, engine)]
+            if not capable:
+                continue
+            if position:
+                self._announce_fallback(capable, previous, engine)
+            produced = self._attempt(capable, engine, runnable)
+            results.update(produced)
+            attempted = {job.id for job in capable}
+            pending = [
+                job
+                for job in pending
+                if job.id not in attempted
+                # Never drag a job the user cancelled onto another engine.
+                or produced[job.id].status
+                in (JobStatus.FAILED, JobStatus.SKIPPED_LOW_QUALITY)
+            ]
+            previous = engine
+        return results
+
+    def _announce_fallback(
+        self, jobs: list[SyncJob], previous: EngineId, engine: EngineId
+    ) -> None:
+        for job in jobs:
+            self._emit_log(
+                job.id,
+                "INFO",
+                f"{previous} did not settle it; retrying with {engine}",
+                jobs,
+            )
+
+    def _attempt(
+        self, runnable: list[SyncJob], engine: EngineId, group: list[SyncJob]
+    ) -> dict[str, SyncResult]:
+        """One pass over these jobs with one engine."""
         first = runnable[0]
         reference_override = None
         serialize = False
         used_cache = False
         producer_key = ""
 
-        # A subtitle or .npz reference has no expensive extraction to cache.
-        if self._config.speech_cache_enabled and needs_ffmpeg(first.reference_path):
-            hit = self._cache.lookup(first.reference_path, first.options)
+        # The .npz cache holds ffsubsync speech arrays and means nothing to the
+        # other engines. A subtitle reference has no expensive extraction either.
+        caches_speech = (
+            self._config.speech_cache_enabled
+            and engine is EngineId.FFSUBSYNC
+            and needs_ffmpeg(first.reference_path)
+        )
+        if caches_speech:
+            speech_options = first.options.ffsubsync
+            hit = self._cache.lookup(first.reference_path, speech_options)
             if hit is not None:
                 reference_override = hit
                 used_cache = True
             else:
                 # Only one process may write the sidecar for a given reference.
                 producer_key = str(
-                    self._cache.cached_path(first.reference_path, first.options)
+                    self._cache.cached_path(first.reference_path, speech_options)
                 )
                 serialize = self._cache.claim_producer(producer_key)
 
@@ -400,6 +459,7 @@ class SyncQueue:
                 runnable,
                 reference_override=reference_override,
                 serialize_speech=serialize,
+                engine=engine,
             )
         )
         with self._lock:
@@ -409,23 +469,22 @@ class SyncQueue:
         try:
             produced = process.run(
                 on_progress=lambda job_id, fraction, stage: self._emit_progress(
-                    job_id, fraction, stage, runnable
+                    job_id, fraction, stage, group
                 ),
                 on_log=lambda job_id, level, message: self._emit_log(
-                    job_id, level, message, runnable
+                    job_id, level, message, group
                 ),
             )
         finally:
             if serialize and producer_key:
                 # Harvest even on failure so no stray .npz is left beside media.
                 with contextlib.suppress(Exception):
-                    self._cache.harvest(first.reference_path, first.options)
+                    self._cache.harvest(first.reference_path, first.options.ffsubsync)
                 self._cache.release_producer(producer_key)
 
-        for job_id, result in produced.items():
+        for result in produced.values():
             result.used_speech_cache = used_cache
-            results[job_id] = result
-        return results
+        return produced
 
     def _persist(self) -> None:
         if not self._persist_queue:

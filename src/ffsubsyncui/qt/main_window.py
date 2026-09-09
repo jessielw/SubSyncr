@@ -40,6 +40,7 @@ from ffsubsyncui.qt.history_view import HistoryDialog
 from ffsubsyncui.qt.match_view import BatchMatchDialog
 from ffsubsyncui.qt.queue_view import COLUMN_PROGRESS, JobTableModel, JobTableView
 from ffsubsyncui.qt.settings_view import SettingsDialog
+from ffsubsyncui.qt.theme import apply_theme
 
 _MAX_LOG_BLOCKS = 5000
 
@@ -241,8 +242,16 @@ class MainWindow(QMainWindow):
         subtitles = [
             path for path in files if path.suffix.casefold() in SUBTITLE_EXTENSIONS
         ]
+        if len(media) == 1 and not subtitles:
+            # Exactly one half of a pair: ask for the other half directly,
+            # rather than a dead-end error.
+            self._run_add_job_dialog(self._build_add_job_dialog(reference=media[0]))
+            return
+        if not media and len(subtitles) == 1:
+            self._run_add_job_dialog(self._build_add_job_dialog(subtitle=subtitles[0]))
+            return
         if not media:
-            # A flat pile of subtitles cannot say which of them is the
+            # A flat pile of 2+ subtitles cannot say which of them is the
             # known-good one, so there is nothing to guess at here.
             QMessageBox.information(
                 self,
@@ -252,14 +261,11 @@ class MainWindow(QMainWindow):
                 "'References are subtitles, not video'.",
             )
             return
-        if not subtitles:
-            QMessageBox.information(
-                self, "Drop files", "No subtitle files were dropped."
-            )
-            return
         dialog = self._build_match_dialog(
             video_folder=str(media[0].parent),
-            subtitle_folder=str(subtitles[0].parent),
+            subtitle_folder=(
+                str(subtitles[0].parent) if subtitles else str(media[0].parent)
+            ),
         )
         dialog.load_files(media, subtitles)
         self._run_match_dialog(dialog)
@@ -302,17 +308,34 @@ class MainWindow(QMainWindow):
             dialog._scan()
         self._run_match_dialog(dialog)
 
-    @Slot()
-    def _add_job(self) -> None:
+    def _build_add_job_dialog(
+        self, *, reference: Path | None = None, subtitle: Path | None = None
+    ) -> AddJobDialog:
         dialog = AddJobDialog(
             self.config.sync,
             output_suffix=self.config.output_suffix,
             fast_mode=self.config.fast_mode,
             parent=self,
         )
+        if reference is not None:
+            dialog.reference.set_text(str(reference))
+        if subtitle is not None:
+            dialog.subtitle.set_text(str(subtitle))
+        # Put the cursor on whichever field still needs filling in.
+        if reference is not None and subtitle is None:
+            dialog.subtitle.edit.setFocus()
+        elif subtitle is not None and reference is None:
+            dialog.reference.edit.setFocus()
+        return dialog
+
+    def _run_add_job_dialog(self, dialog: AddJobDialog) -> None:
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._remember_fast_mode(dialog.fast_mode.isChecked())
             self._queue_jobs([dialog.job()], "Queued")
+
+    @Slot()
+    def _add_job(self) -> None:
+        self._run_add_job_dialog(self._build_add_job_dialog())
 
     def _remember_fast_mode(self, enabled: bool) -> None:
         """Carry a per-batch choice into the next batch."""
@@ -378,6 +401,8 @@ class MainWindow(QMainWindow):
         # The queue holds a reference to this object, so mutate rather than
         # rebind; concurrency then takes effect on the next scheduling pass.
         self.config.sync = updated.sync
+        self.config.theme = updated.theme
+        apply_theme(self.config.theme)
         self.config.concurrency = updated.concurrency
         self.config.match_threshold = updated.match_threshold
         self.config.recursive_scan = updated.recursive_scan
@@ -439,7 +464,7 @@ class MainWindow(QMainWindow):
         return f"~{seconds / 60:.0f} min left"
 
     def _update_ffmpeg_status(self) -> None:
-        status = probe(self.config.sync.ffmpeg_path)
+        status = probe(self.config.sync.environment.ffmpeg_path)
         self.ffmpeg_label.setText(status.message)
         self.ffmpeg_label.setStyleSheet(
             "color: #15803d;" if status.ready else "color: #b45309;"

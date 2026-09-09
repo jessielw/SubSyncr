@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import StrEnum
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,15 @@ from ffsubsyncui.core.models import SyncOptions
 
 APP_NAME = "FFSubSyncUI"
 APP_AUTHOR = "FFSubSyncUI"
+
+
+class Theme(StrEnum):
+    """Automatic tracks the OS color scheme; Light/Dark pin it explicitly."""
+
+    AUTOMATIC = "automatic"
+    LIGHT = "light"
+    DARK = "dark"
+
 
 # ffsubsync is CPU and IO heavy per job; more than a handful of concurrent
 # extractions just thrashes the disk.
@@ -80,6 +90,7 @@ class AppConfig:
     """Everything the user can change that is not a one-off job detail."""
 
     sync: SyncOptions = field(default_factory=SyncOptions)
+    theme: Theme = Theme.AUTOMATIC
     concurrency: int = field(default_factory=default_concurrency)
     match_threshold: float = 75.0
     recursive_scan: bool = True
@@ -106,6 +117,7 @@ class AppConfig:
     def to_dict(self) -> dict[str, Any]:
         return {
             "sync": self.sync.to_dict(),
+            "theme": self.theme.value,
             "concurrency": self.concurrency,
             "match_threshold": self.match_threshold,
             "recursive_scan": self.recursive_scan,
@@ -123,6 +135,7 @@ class AppConfig:
         default = cls()
         config = cls(
             sync=SyncOptions.from_dict(value.get("sync")),
+            theme=_theme(value.get("theme"), default.theme),
             concurrency=_int(value.get("concurrency"), default.concurrency),
             match_threshold=_float(
                 value.get("match_threshold"), default.match_threshold
@@ -163,6 +176,14 @@ class AppConfig:
         except OSError:
             Path(temporary).unlink(missing_ok=True)
             raise
+
+
+def _theme(value: object, default: Theme) -> Theme:
+    try:
+        return Theme(value)
+    except ValueError:
+        # Unknown or hand-edited value; fall back rather than fail to start.
+        return default
 
 
 def _int(value: object, default: int) -> int:

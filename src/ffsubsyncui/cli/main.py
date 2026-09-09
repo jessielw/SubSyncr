@@ -8,13 +8,15 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+import importlib
 import json
 from pathlib import Path
 import sys
 import threading
 
-from ffsubsyncui.core import config as app_config
+from ffsubsyncui.core import binaries, config as app_config, engines
 from ffsubsyncui.core.config import AppConfig
+from ffsubsyncui.core.engines import EngineId
 from ffsubsyncui.core.ffmpeg import probe
 from ffsubsyncui.core.matcher import DEFAULT_THRESHOLD, propose_matches
 from ffsubsyncui.core.models import JobStatus, SyncJob, SyncOptions, default_output_for
@@ -64,6 +66,27 @@ def _collect(
 
 
 # -- commands ------------------------------------------------------------
+
+
+def _apply_engine_flags(options: SyncOptions, args: argparse.Namespace) -> str | None:
+    """Fold --engine and --fallback into the options. Returns a problem, or None."""
+    if chosen := getattr(args, "engine", None):
+        options.engine = EngineId(str(chosen))
+    raw = getattr(args, "fallback", None)
+    if raw is None:
+        return None
+    chain: list[EngineId] = []
+    for name in (part.strip() for part in str(raw).split(",")):
+        if not name:
+            continue
+        if not engines.registered(name):
+            known = ", ".join(spec.id.value for spec in engines.all_specs())
+            return f"unknown engine {name!r} in --fallback (known: {known})"
+        engine = EngineId(name)
+        if engine is not options.engine and engine not in chain:
+            chain.append(engine)
+    options.fallback_chain = tuple(chain)
+    return None
 
 
 def command_match(args: argparse.Namespace) -> int:
@@ -216,7 +239,10 @@ def command_batch(args: argparse.Namespace) -> int:
         config.concurrency = args.workers
         config.normalized()
     if args.fast:
-        config.sync.multi_segment_sync = True
+        config.sync.ffsubsync.multi_segment_sync = True
+    if (problem := _apply_engine_flags(config.sync, args)) is not None:
+        _error(problem)
+        return 2
 
     video_dir, subtitle_dir = _resolve_folders(args.video_dir, args.subtitle_dir)
     if not video_dir.is_dir() or not subtitle_dir.is_dir():
@@ -281,11 +307,14 @@ def command_sync(args: argparse.Namespace) -> int:
     )
     job.output_path = output
     if args.overwrite:
-        job.options.overwrite_input = True
+        job.options.files.overwrite_input = True
     if args.replace:
-        job.options.replace_output = True
+        job.options.files.replace_output = True
     if args.fast:
-        job.options.multi_segment_sync = True
+        job.options.ffsubsync.multi_segment_sync = True
+    if (problem := _apply_engine_flags(job.options, args)) is not None:
+        _error(problem)
+        return 2
 
     _echo(f"{args.subtitle.name} -> {output.name}")
     return _run_jobs([job], config, verbose=args.verbose)
@@ -336,7 +365,7 @@ def command_history(args: argparse.Namespace) -> int:
 def command_doctor(args: argparse.Namespace) -> int:
     del args
     config = AppConfig.load()
-    status = probe(config.sync.ffmpeg_path)
+    status = probe(config.sync.environment.ffmpeg_path)
     _echo(f"config      : {app_config.config_path()}")
     _echo(f"database    : {app_config.database_path()}")
     _echo(f"speech cache: {app_config.speech_cache_dir()}")
@@ -344,14 +373,34 @@ def command_doctor(args: argparse.Namespace) -> int:
     _echo(f"ffmpeg      : {status.message}")
     if not status.has_ffprobe and status.ready:
         _echo("              progress will be indeterminate without ffprobe")
-    try:
-        import ffsubsync
+    _echo(f"engine      : {config.sync.engine}")
+    if config.sync.fallback_chain:
+        _echo(f"fallback    : {', '.join(config.sync.fallback_chain)}")
+    _echo("")
+    _echo("engines:")
+    healthy = True
+    for spec in engines.all_specs():
+        _echo(f"  {spec.label:<12} {_engine_report(spec)}")
+        if spec.id is config.sync.engine and "unavailable" in _engine_report(spec):
+            healthy = False
+    return 0 if status.ready and healthy else 1
 
-        _echo(f"ffsubsync   : {ffsubsync.__version__}")
+
+def _engine_report(spec: engines.EngineSpec) -> str:
+    """One line on whether this engine could run right now."""
+    if spec.kind is engines.EngineKind.BINARY:
+        binary = binaries.spec_for(spec.id)
+        if binary is None:  # pragma: no cover - a registry mistake
+            return "no binary configured"
+        return binaries.status(binary, app_config.cache_dir()).message
+    try:
+        module = importlib.import_module(
+            "ffsubsync" if spec.id is EngineId.FFSUBSYNC else "autosubsync"
+        )
     except Exception as exc:
-        _echo(f"ffsubsync   : unavailable ({exc})")
-        return 1
-    return 0 if status.ready else 1
+        return f"unavailable ({exc})"
+    version = getattr(module, "__version__", "installed")
+    return f"ready ({version})"
 
 
 # -- parser --------------------------------------------------------------
@@ -363,6 +412,23 @@ def build_parser() -> argparse.ArgumentParser:
         description="Batch subtitle synchronization built on ffsubsync.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    def add_engine_flags(target: argparse.ArgumentParser) -> None:
+        target.add_argument(
+            "--engine",
+            choices=[spec.id.value for spec in engines.all_specs()],
+            default=None,
+            help="which aligner to use (default: whatever Settings says)",
+        )
+        target.add_argument(
+            "--fallback",
+            default=None,
+            metavar="ENGINE,...",
+            help=(
+                "engines to retry with, in order, when the first one fails or "
+                "returns a low-quality verdict"
+            ),
+        )
 
     def add_scan_flags(target: argparse.ArgumentParser) -> None:
         target.add_argument("video_dir", type=Path)
@@ -399,6 +465,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="only queue pairings at or above this confidence (default: %(default)s)",
     )
     batch.add_argument("--workers", type=int, default=0, metavar="N")
+    add_engine_flags(batch)
     batch.add_argument("--dry-run", action="store_true")
     batch.add_argument(
         "--fast",
@@ -421,6 +488,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="sample short segments instead of reading the reference in full",
     )
+    add_engine_flags(sync)
     sync.add_argument("-v", "--verbose", action="store_true")
     sync.set_defaults(handler=command_sync)
 

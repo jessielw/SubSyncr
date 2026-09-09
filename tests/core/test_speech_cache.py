@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ffsubsyncui.core.models import SyncOptions
+from support import sync_options
+
+from ffsubsyncui.core.models import FFSubSyncOptions
 from ffsubsyncui.core.speech_cache import SpeechCache
 
 
@@ -17,7 +19,7 @@ def _reference(tmp_path: Path, name: str = "ep.mkv") -> Path:
 def test_miss_then_hit(tmp_path: Path) -> None:
     cache = SpeechCache(tmp_path / "cache")
     reference = _reference(tmp_path)
-    options = SyncOptions()
+    options = FFSubSyncOptions()
     assert cache.lookup(reference, options) is None
 
     cache.sidecar_for(reference).write_bytes(b"speech")
@@ -31,13 +33,13 @@ def test_harvest_leaves_nothing_beside_the_media(tmp_path: Path) -> None:
     cache = SpeechCache(tmp_path / "cache")
     reference = _reference(tmp_path)
     cache.sidecar_for(reference).write_bytes(b"speech")
-    cache.harvest(reference, SyncOptions())
+    cache.harvest(reference, FFSubSyncOptions())
     assert not cache.sidecar_for(reference).exists()
 
 
 def test_harvest_without_a_sidecar_is_not_an_error(tmp_path: Path) -> None:
     cache = SpeechCache(tmp_path / "cache")
-    assert cache.harvest(_reference(tmp_path), SyncOptions()) is None
+    assert cache.harvest(_reference(tmp_path), FFSubSyncOptions()) is None
 
 
 def test_extraction_settings_key_the_cache(tmp_path: Path) -> None:
@@ -45,24 +47,24 @@ def test_extraction_settings_key_the_cache(tmp_path: Path) -> None:
     cache = SpeechCache(tmp_path / "cache")
     reference = _reference(tmp_path)
     cache.sidecar_for(reference).write_bytes(b"speech")
-    cache.harvest(reference, SyncOptions(vad="webrtc"))
-    assert cache.lookup(reference, SyncOptions(vad="webrtc")) is not None
-    assert cache.lookup(reference, SyncOptions(vad="auditok")) is None
-    assert cache.lookup(reference, SyncOptions(start_seconds=30)) is None
+    cache.harvest(reference, sync_options(vad="webrtc").ffsubsync)
+    assert cache.lookup(reference, sync_options(vad="webrtc").ffsubsync) is not None
+    assert cache.lookup(reference, sync_options(vad="auditok").ffsubsync) is None
+    assert cache.lookup(reference, sync_options(start_seconds=30).ffsubsync) is None
 
 
 def test_unrelated_settings_do_not_key_the_cache(tmp_path: Path) -> None:
     cache = SpeechCache(tmp_path / "cache")
     reference = _reference(tmp_path)
     cache.sidecar_for(reference).write_bytes(b"speech")
-    cache.harvest(reference, SyncOptions())
-    assert cache.lookup(reference, SyncOptions(encoding="utf-8")) is not None
+    cache.harvest(reference, FFSubSyncOptions())
+    assert cache.lookup(reference, sync_options(encoding="utf-8").ffsubsync) is not None
 
 
 def test_a_changed_video_invalidates_the_cache(tmp_path: Path) -> None:
     cache = SpeechCache(tmp_path / "cache")
     reference = _reference(tmp_path)
-    options = SyncOptions()
+    options = FFSubSyncOptions()
     cache.sidecar_for(reference).write_bytes(b"speech")
     cache.harvest(reference, options)
     assert cache.lookup(reference, options) is not None
@@ -76,15 +78,15 @@ def test_subtitle_references_are_never_cached(tmp_path: Path) -> None:
     cache = SpeechCache(tmp_path / "cache")
     subtitle = tmp_path / "reference.srt"
     subtitle.write_text("1\n", encoding="utf-8")
-    assert cache.lookup(subtitle, SyncOptions()) is None
+    assert cache.lookup(subtitle, FFSubSyncOptions()) is None
 
 
 def test_disabled_cache_never_hits(tmp_path: Path) -> None:
     cache = SpeechCache(tmp_path / "cache", enabled=False)
     reference = _reference(tmp_path)
     cache.sidecar_for(reference).write_bytes(b"speech")
-    cache.harvest(reference, SyncOptions())
-    assert cache.lookup(reference, SyncOptions()) is None
+    cache.harvest(reference, FFSubSyncOptions())
+    assert cache.lookup(reference, FFSubSyncOptions()) is None
     assert cache.claim_producer("key") is False
 
 
@@ -108,7 +110,7 @@ def test_size_and_clear(tmp_path: Path) -> None:
     for name in ("a.mkv", "b.mkv"):
         reference = _reference(tmp_path, name)
         cache.sidecar_for(reference).write_bytes(b"speech data")
-        cache.harvest(reference, SyncOptions())
+        cache.harvest(reference, FFSubSyncOptions())
     assert cache.size_bytes() > 0
     assert cache.clear() == 2
     assert cache.size_bytes() == 0

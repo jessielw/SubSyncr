@@ -4,7 +4,13 @@ Run as ``python -m ffsubsyncui.core.worker``, or as ``<frozen exe> --sync-worker
 when packaged. Reads a JSON job-group spec on stdin and writes newline-delimited
 JSON events on stdout.
 
-Isolating ffsubsync in its own process buys three things that are impossible
+This module owns the *protocol* - the event channel, stdout ownership, and
+cancellation. It does not know how any particular engine works: it reads the
+spec's ``engine`` field, imports that engine's module by the dotted path in the
+registry, and hands over. Engines are imported here and nowhere else, so the
+GUI process never pays for numpy, ffsubsync or anything else they drag in.
+
+Isolating an engine in its own process buys three things that are impossible
 in-process:
 
 * **Cancellation.** ffsubsync exposes no cancel hook, but a process can be killed.
@@ -13,31 +19,35 @@ in-process:
   which would otherwise reconfigure the host application's logging.
 
 A *group* is one reference plus every subtitle that syncs against it, usually
-the language variants of one episode. Extracting speech from the reference is by
-far the most expensive step, so the whole group shares a single extraction held
-in memory - about fifteen times faster per sibling than paying process startup
-and a serialized speech array for each one.
+the language variants of one episode. For ffsubsync the whole group shares a
+single extraction held in memory - about fifteen times faster per sibling than
+paying process startup and a serialized speech array for each one. Engines that
+cannot share simply loop, and still save the process startup per subtitle.
+
+**Cancellation.** The parent writes the spec, then holds stdin open. Closing it
+is the cancel signal: a watcher thread sees EOF, sets the token, and terminates
+whatever native child is running. This works identically on Windows and POSIX,
+where signals and process groups do not. The parent still kills the worker
+outright if it does not exit in time. Because a pipe held open forever would
+hang any tool that reads stdin, ``claim_stdin`` moves the real pipe to a private
+descriptor and leaves fd 0 pointing at the null device for children to inherit.
 """
 
 from __future__ import annotations
 
+import contextlib
+import importlib
 import json
-import logging
 import os
 from pathlib import Path
-import re
-import shutil
+import subprocess
 import sys
-import time
+import tempfile
+import threading
 from typing import Any, TextIO
 
-from ffsubsyncui.core.scanner import needs_ffmpeg
-
-# Log lines that carry results ffsubsync never returns to its caller.
-_SCORE = re.compile(r"^score:\s*(-?\d+(?:\.\d+)?)")
-_OFFSET = re.compile(r"^offset seconds:\s*(-?\d+(?:\.\d+)?)")
-_SCALE = re.compile(r"^framerate scale factor:\s*(-?\d+(?:\.\d+)?)")
-_LOW_QUALITY = re.compile(r"^low-quality alignment \((.*)\); leaving subtitles")
+from ffsubsyncui.core import engines
+from ffsubsyncui.core.engines import EngineId
 
 
 class EventChannel:
@@ -45,23 +55,66 @@ class EventChannel:
 
     def __init__(self, stream: TextIO) -> None:
         self._stream = stream
+        self._lock = threading.Lock()
 
     def emit(self, event: str, **payload: Any) -> None:
         payload["event"] = event
+        line = json.dumps(payload, default=str) + "\n"
         try:
-            self._stream.write(json.dumps(payload, default=str) + "\n")
-            self._stream.flush()
+            # Engines may report from a reader thread while the main thread
+            # emits progress; a half-written line would break the protocol.
+            with self._lock:
+                self._stream.write(line)
+                self._stream.flush()
         except (OSError, ValueError):
             # The parent went away. Nothing useful left to do.
             pass
+
+
+class CancelToken:
+    """A cancellation flag that also reaps whatever native child is running.
+
+    Engines that spawn a binary register it with ``attach`` so a cancel arriving
+    mid-run does not have to wait for the tool to finish on its own.
+    """
+
+    def __init__(self) -> None:
+        self._flag = threading.Event()
+        self._lock = threading.Lock()
+        self._child: subprocess.Popen[Any] | None = None
+
+    @property
+    def cancelled(self) -> bool:
+        return self._flag.is_set()
+
+    def cancel(self) -> None:
+        self._flag.set()
+        with self._lock:
+            child = self._child
+        if child is not None and child.poll() is None:
+            with contextlib.suppress(OSError, ValueError):
+                child.terminate()
+
+    def attach(self, child: subprocess.Popen[Any]) -> None:
+        """Register the running child, terminating it if we are already cancelled."""
+        with self._lock:
+            self._child = child
+        if self.cancelled and child.poll() is None:
+            with contextlib.suppress(OSError, ValueError):
+                child.terminate()
+
+    def detach(self) -> None:
+        with self._lock:
+            self._child = None
 
 
 def claim_stdout() -> TextIO:
     """Take exclusive ownership of fd 1 for the event channel.
 
     Anything else that writes to stdout - a stray print, ffsubsync writing
-    subtitles to ``sys.stdout.fileno()`` when ``-o`` is missing - is rerouted to
-    stderr so it can never corrupt the protocol.
+    subtitles to ``sys.stdout.fileno()`` when ``-o`` is missing, a native tool
+    inheriting our handles - is rerouted to stderr so it can never corrupt the
+    protocol.
 
     The parent always supplies real pipes, but a windowed frozen build leaves
     ``sys.stdout``/``sys.stderr`` as ``None``, which breaks any library that
@@ -81,314 +134,156 @@ def claim_stdout() -> TextIO:
     return os.fdopen(saved_fd, "w", encoding="utf-8", errors="replace", buffering=1)
 
 
-class _ResultScraper(logging.Handler):
-    """Forward ffsubsync log records and mine them for hidden results.
+def claim_stdin() -> TextIO:
+    """Take fd 0 for the control channel and leave children an empty stdin.
 
-    ``item_id`` tags every record with whichever subtitle is being synced, so a
-    group's shared extraction and its per-subtitle work stay distinguishable.
+    The parent holds our stdin open so that closing it can mean "cancel", but a
+    pipe that never reaches EOF is poison for anything we spawn: ffmpeg reads
+    stdin for interactive commands and will sit on it forever. So the real pipe
+    is moved to a private descriptor and fd 0 is pointed at the null device,
+    which every child then inherits and sees as an immediate end of input.
+
+    The mirror image of ``claim_stdout``, and for the same reason: the protocol
+    owns the standard descriptors, and nothing else gets to touch them.
     """
-
-    def __init__(self, channel: EventChannel) -> None:
-        super().__init__(logging.INFO)
-        self._channel = channel
-        self.item_id: str | None = None
-        self.reset()
-
-    def reset(self) -> None:
-        self.score: float | None = None
-        self.offset_seconds: float | None = None
-        self.framerate_scale_factor: float | None = None
-        self.low_quality_reasons: list[str] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            message = record.getMessage()
-        except Exception:
-            return
-        if match := _SCORE.match(message):
-            self.score = float(match[1])
-        elif match := _OFFSET.match(message):
-            self.offset_seconds = float(match[1])
-        elif match := _SCALE.match(message):
-            self.framerate_scale_factor = float(match[1])
-        elif match := _LOW_QUALITY.match(message):
-            self.low_quality_reasons = [
-                reason.strip() for reason in match[1].split(";") if reason.strip()
-            ]
-        self._channel.emit(
-            "log", job_id=self.item_id, level=record.levelname, message=message
-        )
-
-
-def build_arguments(spec: dict[str, Any], item: dict[str, Any]) -> list[str]:
-    """Translate a group spec plus one of its subtitles into an ffsubsync argv.
-
-    Only the first item builds the namespace; the rest are swapped in afterwards
-    by rebinding ``srtin``/``srtout``.
-    """
-    options: dict[str, Any] = spec.get("options") or {}
-    reference = str(spec["reference"])
-    arguments = [reference, "-i", str(item["subtitle"])]
-
-    if options.get("overwrite_input"):
-        arguments.append("--overwrite-input")
-    else:
-        # Always explicit. With no -o, ffsubsync writes subtitle bytes straight
-        # to stdout, and validate_args calls sys.stdin.isatty() when -i is absent.
-        arguments.extend(("-o", str(item["output"])))
-
-    arguments.extend(("--encoding", str(options.get("encoding", "infer"))))
-    arguments.extend(
-        ("--output-encoding", str(options.get("output_encoding", "utf-8")))
-    )
-    arguments.extend(
-        ("--max-offset-seconds", str(options.get("max_offset_seconds", 60.0)))
-    )
-    arguments.extend(("--start-seconds", str(int(options.get("start_seconds", 0)))))
-    arguments.extend(("--frame-rate", str(int(options.get("frame_rate", 48000)))))
-    arguments.extend(("--non-speech-label", str(options.get("non_speech_label", 0.0))))
-    arguments.extend(
-        ("--apply-offset-seconds", str(options.get("apply_offset_seconds", 0.0)))
-    )
-
-    # VAD only applies when speech has to be detected in audio. Subtitle and
-    # serialized-speech references warn ("Vad specified, but reference was not
-    # a movie") and ignore it.
-    if needs_ffmpeg(Path(reference)) and options.get("vad"):
-        arguments.extend(("--vad", str(options["vad"])))
-
-    if options.get("no_fix_framerate"):
-        arguments.append("--no-fix-framerate")
-    if options.get("gss"):
-        arguments.append("--gss")
-    if stream := str(options.get("reference_stream", "")).strip():
-        arguments.extend(("--reference-stream", stream))
-    if ffmpeg_path := str(options.get("ffmpeg_path", "")).strip():
-        arguments.extend(("--ffmpeg-path", ffmpeg_path))
-
-    if (split_penalty := options.get("split_penalty")) is not None:
-        arguments.extend(("--split-penalty", str(split_penalty)))
-    if options.get("multi_segment_sync"):
-        arguments.append("--multi-segment-sync")
-        arguments.extend(("--segment-count", str(int(options.get("segment_count", 8)))))
-    if (max_duration := options.get("max_duration_seconds")) is not None:
-        arguments.extend(("--max-duration-seconds", str(max_duration)))
-
-    if options.get("skip_sync_on_low_quality"):
-        arguments.append("--skip-sync-on-low-quality")
-        arguments.extend(("--min-score", str(options.get("min_score", 0.0))))
-        arguments.extend(
-            (
-                "--quality-max-offset-seconds",
-                str(options.get("quality_max_offset_seconds", 30.0)),
-            )
-        )
-        arguments.extend(
-            (
-                "--max-framerate-deviation",
-                str(options.get("max_framerate_deviation", 0.1)),
-            )
-        )
-
-    return arguments
-
-
-def backup_original(subtitle: Path) -> Path | None:
-    """Copy a subtitle aside before it is overwritten in place.
-
-    An existing backup is never replaced: a second run would otherwise bury the
-    true original under the already-synced version.
-    """
-    target = subtitle.with_suffix(subtitle.suffix + ".bak")
-    if target.exists():
-        return target
+    saved_fd = os.dup(0)
+    empty = os.open(os.devnull, os.O_RDONLY)
     try:
-        shutil.copy2(subtitle, target)
-    except OSError:
-        return None
-    return target
-
-
-def _classify(synced: bool, output: Path, scraper: _ResultScraper) -> tuple[str, str]:
-    """Turn ffsubsync's ambiguous signals into one status and a message."""
-    if scraper.low_quality_reasons:
-        # ffsubsync wrote the *original* subtitles to the output path, so the
-        # file existing proves nothing here.
-        return "skipped_low_quality", "; ".join(scraper.low_quality_reasons)
-    if synced and output.is_file():
-        return "succeeded", ""
-    if synced:
-        return "failed", f"ffsubsync reported success but wrote no output to {output}"
-    return "failed", "ffsubsync could not align these files"
-
-
-def run_group(spec: dict[str, Any], channel: EventChannel) -> int:
-    """Sync every subtitle in the group against one shared extraction."""
-    # Imported here so claim_stdout() runs first and the basicConfig side effect
-    # of this import lands in a process we own.
-    from ffsubsync.ffsubsync import (
-        make_parser,
-        make_reference_pipe,
-        try_sync,
-        validate_and_transform_args,
-    )
-    import numpy as np
-
-    items: list[dict[str, Any]] = list(spec.get("items") or [])
-    if not items:
-        return 0
-    options: dict[str, Any] = spec.get("options") or {}
-    overwrite = bool(options.get("overwrite_input"))
-
-    scraper = _ResultScraper(channel)
-    logger = logging.getLogger("ffsubsync")
-    logger.addHandler(scraper)
-
-    def fail_all(message: str) -> None:
-        for item in items:
-            channel.emit(
-                "result",
-                job_id=item["id"],
-                status="failed",
-                return_code=1,
-                error=message,
-                duration_seconds=0.0,
-            )
-
-    try:
-        arguments = build_arguments(spec, items[0])
-        channel.emit("started", pid=os.getpid(), argv=arguments, items=len(items))
-
-        args = validate_and_transform_args(make_parser().parse_args(arguments))
-        if args is None:
-            fail_all("ffsubsync rejected these arguments")
-            return 1
-
-        last_fraction = -1.0
-
-        def on_progress(info: Any) -> None:
-            nonlocal last_fraction
-            raw = getattr(info, "fraction", None)
-            fraction = float(raw) if raw is not None else None
-            if fraction is not None and abs(fraction - last_fraction) < 0.005:
-                return  # Don't flood the pipe with sub-percent updates.
-            if fraction is not None:
-                last_fraction = fraction
-            channel.emit(
-                "progress", job_id=None, fraction=fraction, stage="Extracting speech"
-            )
-
-        # The expensive step, paid once for the whole group.
-        extraction_started = time.monotonic()
-        reference_pipe = make_reference_pipe(args, progress_handler=on_progress)
-        reference_pipe.fit(args.reference)
-        extraction_seconds = time.monotonic() - extraction_started
-        channel.emit("extracted", seconds=extraction_seconds)
-
-        if spec.get("serialize_speech"):
-            # ffsubsync only ever writes this beside the reference; the parent
-            # moves it into the cache directory afterwards.
-            try:
-                np.savez_compressed(
-                    os.path.splitext(args.reference)[0] + ".npz",
-                    speech=reference_pipe.transform(args.reference),
-                )
-            except Exception as exc:
-                channel.emit(
-                    "log",
-                    job_id=None,
-                    level="WARNING",
-                    message=f"could not cache speech: {exc}",
-                )
-
-        for index, item in enumerate(items):
-            started = time.monotonic()
-            scraper.reset()
-            scraper.item_id = str(item["id"])
-            subtitle = Path(str(item["subtitle"]))
-            output = subtitle if overwrite else Path(str(item["output"]))
-            channel.emit(
-                "progress", job_id=str(item["id"]), fraction=None, stage="Aligning"
-            )
-            try:
-                if overwrite and options.get("backup_before_overwrite", True):
-                    if (saved := backup_original(subtitle)) is not None:
-                        channel.emit(
-                            "log",
-                            job_id=str(item["id"]),
-                            level="INFO",
-                            message=f"kept the original at {saved.name}",
-                        )
-                    else:
-                        channel.emit(
-                            "log",
-                            job_id=str(item["id"]),
-                            level="WARNING",
-                            message="could not write a backup; overwriting anyway",
-                        )
-                args.srtin = [str(subtitle)]
-                args.srtout = None if overwrite else str(output)
-                result: dict[str, Any] = {}
-                synced = bool(try_sync(args, reference_pipe, result))
-                status, error = _classify(synced, output, scraper)
-                channel.emit(
-                    "result",
-                    job_id=str(item["id"]),
-                    status=status,
-                    return_code=0,
-                    offset_seconds=(
-                        _as_float(result.get("offset_seconds"))
-                        if result.get("offset_seconds") is not None
-                        else scraper.offset_seconds
-                    ),
-                    framerate_scale_factor=(
-                        _as_float(result.get("framerate_scale_factor"))
-                        if result.get("framerate_scale_factor") is not None
-                        else scraper.framerate_scale_factor
-                    ),
-                    score=scraper.score,
-                    quality_reasons=scraper.low_quality_reasons,
-                    error=error,
-                    # Only the first subtitle is charged for the shared
-                    # extraction; the rest genuinely cost what they cost.
-                    duration_seconds=(time.monotonic() - started)
-                    + (extraction_seconds if index == 0 else 0.0),
-                    shared_extraction=index > 0,
-                )
-            except Exception as exc:
-                channel.emit(
-                    "result",
-                    job_id=str(item["id"]),
-                    status="failed",
-                    return_code=1,
-                    error=str(exc) or type(exc).__name__,
-                    duration_seconds=time.monotonic() - started,
-                )
-        return 0
-    except Exception as exc:
-        fail_all(str(exc) or type(exc).__name__)
-        return 1
+        os.dup2(empty, 0)
     finally:
-        logger.removeHandler(scraper)
-        scraper.close()
+        os.close(empty)
+    sys.stdin = open(os.devnull, encoding="utf-8")  # noqa: SIM115
+    return os.fdopen(saved_fd, "r", encoding="utf-8", errors="replace")
 
 
-def _as_float(value: object) -> float | None:
-    return float(value) if isinstance(value, int | float) else None
+def watch_for_cancel(cancel: CancelToken, stream: TextIO) -> threading.Thread:
+    """Cancel as soon as the parent closes our stdin.
+
+    Daemon, so a worker that finishes normally is never held open by a thread
+    still blocked on a read.
+    """
+
+    def wait() -> None:
+        with contextlib.suppress(OSError, ValueError):
+            # Any further line, or EOF, means stop. The parent sends nothing
+            # after the spec, so in practice this returns "" when it hangs up.
+            stream.readline()
+        cancel.cancel()
+
+    thread = threading.Thread(target=wait, name="cancel-watch", daemon=True)
+    thread.start()
+    return thread
+
+
+def use_embedded_reference(
+    spec: dict[str, Any], channel: EventChannel, workdir: Path
+) -> Path | None:
+    """Swap the video reference for a subtitle track inside it, if asked.
+
+    Done here rather than inside each engine because it is a property of the
+    group's reference, not of how any one tool aligns. lapse is the exception:
+    it searches embedded tracks itself, and doing it twice would only take the
+    choice away from it.
+
+    Any failure is logged and ignored - the video is still a perfectly good
+    reference, just a slower one.
+    """
+    options: dict[str, Any] = spec.get("options") or {}
+    if not options.get("extract_embedded"):
+        return None
+    if str(spec.get("engine", "")) == EngineId.LAPSE.value:
+        return None
+
+    from ffsubsyncui.core import embedded
+    from ffsubsyncui.core.scanner import needs_ffmpeg
+
+    reference = Path(str(spec["reference"]))
+    if not needs_ffmpeg(reference):
+        return None  # Already a subtitle or a cached speech array.
+
+    environment: dict[str, Any] = options.get("environment") or {}
+    items: list[dict[str, Any]] = list(spec.get("items") or [])
+    language = str(items[0].get("language", "")) if items else ""
+    try:
+        found = embedded.reference_from(
+            reference,
+            workdir,
+            prefer_language=language or None,
+            ffmpeg_path=str(environment.get("ffmpeg_path", "")),
+        )
+    except embedded.ExtractionError as exc:
+        channel.emit(
+            "log",
+            job_id=None,
+            level="WARNING",
+            message=f"no embedded subtitle to align against ({exc}); using the audio",
+        )
+        return None
+    if found is None:
+        channel.emit(
+            "log",
+            job_id=None,
+            level="INFO",
+            message="no text subtitle track in the reference; using the audio",
+        )
+        return None
+
+    extracted, track = found
+    label = track.language or track.title or f"track {track.index}"
+    channel.emit(
+        "log",
+        job_id=None,
+        level="INFO",
+        message=f"aligning against the embedded {label} subtitle instead of the audio",
+    )
+    spec["reference"] = str(extracted)
+    return extracted
+
+
+def dispatch(spec: dict[str, Any], channel: EventChannel, cancel: CancelToken) -> int:
+    """Hand the group to the engine it names."""
+    engine = str(spec.get("engine", "ffsubsync"))
+    try:
+        module = importlib.import_module(engines.get(engine).module)
+    except KeyError:
+        channel.emit("fatal", error=f"Unknown sync engine: {engine}")
+        return 2
+    except ImportError as exc:
+        channel.emit("fatal", error=f"Sync engine {engine} is unavailable: {exc}")
+        return 2
+    with tempfile.TemporaryDirectory(prefix="ffsubsyncui-") as scratch:
+        use_embedded_reference(spec, channel, Path(scratch))
+        return int(module.run_group(spec, channel, cancel))
 
 
 def main(argv: list[str] | None = None) -> int:
     del argv  # The spec arrives on stdin, not the command line.
     channel = EventChannel(claim_stdout())
+    cancel = CancelToken()
+    if sys.stdin is None:
+        channel.emit("fatal", error="No job spec: the worker has no stdin")
+        return 2
+    control = claim_stdin()
     try:
-        spec = json.loads(sys.stdin.read())
-    except (json.JSONDecodeError, OSError) as exc:
+        # One line, not read-to-EOF: the parent keeps the pipe open so that
+        # closing it later can mean "cancel".
+        raw = control.readline()
+    except (OSError, ValueError) as exc:
+        channel.emit("fatal", error=f"Could not read the job spec: {exc}")
+        return 2
+    if not raw.strip():
+        channel.emit("fatal", error="No job spec was sent")
+        return 2
+    try:
+        spec = json.loads(raw)
+    except json.JSONDecodeError as exc:
         channel.emit("fatal", error=f"Bad job spec: {exc}")
         return 2
     if not isinstance(spec, dict):
         channel.emit("fatal", error="Job spec must be an object")
         return 2
-    return run_group(spec, channel)
+    watch_for_cancel(cancel, control)
+    return dispatch(spec, channel, cancel)
 
 
 if __name__ == "__main__":

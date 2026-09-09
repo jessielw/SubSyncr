@@ -6,19 +6,20 @@ import json
 from pathlib import Path
 
 import pytest
+from support import sync_options
 
 from ffsubsyncui.core.config import (
     MAX_CONCURRENCY,
     AppConfig,
+    Theme,
     default_concurrency,
 )
-from ffsubsyncui.core.models import SyncOptions
 
 
 def test_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "config.json"
     config = AppConfig(
-        sync=SyncOptions(vad="auditok", split_penalty=5.0),
+        sync=sync_options(vad="auditok", split_penalty=5.0),
         concurrency=3,
         output_suffix=".fixed",
     )
@@ -26,8 +27,8 @@ def test_round_trip(tmp_path: Path) -> None:
     restored = AppConfig.load(path)
     assert restored.concurrency == 3
     assert restored.output_suffix == ".fixed"
-    assert restored.sync.vad == "auditok"
-    assert restored.sync.split_penalty == 5.0
+    assert restored.sync.ffsubsync.vad == "auditok"
+    assert restored.sync.ffsubsync.split_penalty == 5.0
 
 
 def test_missing_file_yields_defaults(tmp_path: Path) -> None:
@@ -61,6 +62,23 @@ def test_auto_start_round_trips(tmp_path: Path) -> None:
     path = tmp_path / "config.json"
     AppConfig(auto_start=False).save(path)
     assert AppConfig.load(path).auto_start is False
+
+
+def test_theme_defaults_to_automatic() -> None:
+    assert AppConfig().theme is Theme.AUTOMATIC
+
+
+def test_theme_round_trips(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    AppConfig(theme=Theme.DARK).save(path)
+    assert AppConfig.load(path).theme is Theme.DARK
+
+
+def test_unknown_theme_falls_back_to_automatic(tmp_path: Path) -> None:
+    """A hand-edited or stale config value must not stop the app starting."""
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"theme": "solarized"}), encoding="utf-8")
+    assert AppConfig.load(path).theme is Theme.AUTOMATIC
 
 
 def test_threshold_is_clamped() -> None:

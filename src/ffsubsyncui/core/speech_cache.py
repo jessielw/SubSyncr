@@ -23,11 +23,11 @@ from pathlib import Path
 import shutil
 import threading
 
-from ffsubsyncui.core.models import SyncOptions
+from ffsubsyncui.core.models import FFSubSyncOptions
 from ffsubsyncui.core.scanner import needs_ffmpeg
 
 
-def _fingerprint(reference: Path, options: SyncOptions) -> str:
+def _fingerprint(reference: Path, options: FFSubSyncOptions) -> str:
     """Stable id for "this file, extracted these settings"."""
     try:
         stat = reference.stat()
@@ -53,10 +53,10 @@ class SpeechCache:
         with self._guard:
             return self._producing.setdefault(key, threading.Lock())
 
-    def cached_path(self, reference: Path, options: SyncOptions) -> Path:
+    def cached_path(self, reference: Path, options: FFSubSyncOptions) -> Path:
         return self.directory / f"{_fingerprint(reference, options)}.npz"
 
-    def lookup(self, reference: Path, options: SyncOptions) -> Path | None:
+    def lookup(self, reference: Path, options: FFSubSyncOptions) -> Path | None:
         """An existing speech array for this reference, if we have one."""
         if not self.enabled or not needs_ffmpeg(reference):
             return None
@@ -80,7 +80,7 @@ class SpeechCache:
             with contextlib.suppress(RuntimeError):
                 lock.release()
 
-    def harvest(self, reference: Path, options: SyncOptions) -> Path | None:
+    def harvest(self, reference: Path, options: FFSubSyncOptions) -> Path | None:
         """Move the sidecar ffsubsync just wrote into the cache.
 
         Returns the cached path, or ``None`` if nothing was produced.

@@ -1,165 +1,206 @@
-"""Argument construction and result interpretation in the sync child.
+"""The worker protocol: spec framing, engine dispatch, and cancellation.
 
-These encode the ffsubsync behaviours that are easy to get wrong and expensive
-to discover at runtime.
+These are about the contract between parent and child, not about any engine.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
+import io
+import json
+import subprocess
+import sys
+import threading
+import time
 from typing import Any
 
-from ffsubsyncui.core.models import SyncOptions
-from ffsubsyncui.core.worker import build_arguments
+import pytest
 
-_ITEM: dict[str, Any] = {
-    "id": "job-1",
-    "subtitle": "ep.en.srt",
-    "output": "ep.en.synced.srt",
-}
+from ffsubsyncui.core.worker import CancelToken, EventChannel, dispatch
 
 
-def _spec(**overrides: Any) -> dict[str, Any]:
-    spec: dict[str, Any] = {
-        "reference": "ep.mkv",
-        "options": SyncOptions().to_dict(),
-        "serialize_speech": False,
-        "items": [_ITEM],
-    }
-    spec.update(overrides)
-    return spec
+class _Sink(io.StringIO):
+    """A stdout stand-in that records the events written to it."""
+
+    def events(self) -> list[dict[str, Any]]:
+        return [
+            json.loads(line) for line in self.getvalue().splitlines() if line.strip()
+        ]
 
 
-def _args(**overrides: Any) -> list[str]:
-    spec = _spec(**overrides)
-    return build_arguments(spec, spec["items"][0])
+def test_events_are_one_json_object_per_line() -> None:
+    sink = _Sink()
+    channel = EventChannel(sink)
+    channel.emit("progress", job_id="a", fraction=0.5)
+    channel.emit("result", job_id="a", status="succeeded")
+    assert [event["event"] for event in sink.events()] == ["progress", "result"]
+    assert sink.events()[0]["fraction"] == 0.5
 
 
-def _pairs(arguments: list[str], flag: str) -> str | None:
-    return arguments[arguments.index(flag) + 1] if flag in arguments else None
+def test_emitting_survives_a_closed_parent() -> None:
+    """A cancelled parent closes the pipe mid-run; that is not a crash."""
+    sink = _Sink()
+    channel = EventChannel(sink)
+    sink.close()
+    channel.emit("log", message="into the void")  # Must not raise.
 
 
-def test_output_is_always_explicit() -> None:
-    """Without -o, ffsubsync writes subtitle bytes to our event channel."""
-    arguments = _args()
-    assert "-o" in arguments
-    assert _pairs(arguments, "-o") == "ep.en.synced.srt"
+def test_concurrent_emits_never_interleave() -> None:
+    """Engines report from a reader thread while progress comes from another."""
+    sink = _Sink()
+    channel = EventChannel(sink)
+    threads = [
+        threading.Thread(target=channel.emit, args=("log",), kwargs={"n": index})
+        for index in range(50)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(event["n"] for event in sink.events()) == list(range(50))
 
 
-def test_input_is_always_explicit() -> None:
-    """Omitting -i makes ffsubsync call sys.stdin.isatty(), which can be None."""
-    assert "-i" in _args()
+def test_dispatch_rejects_an_unknown_engine() -> None:
+    sink = _Sink()
+    code = dispatch({"engine": "wishful"}, EventChannel(sink), CancelToken())
+    assert code == 2
+    assert sink.events()[-1]["event"] == "fatal"
+    assert "wishful" in sink.events()[-1]["error"]
 
 
-def test_gui_mode_is_never_passed() -> None:
-    """--gui-mode redirects tqdm to stdout and forces its own output path."""
-    assert "--gui-mode" not in _args()
+def test_dispatch_defaults_to_ffsubsync(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A spec from an older queue row has no engine field."""
+    seen: dict[str, Any] = {}
+
+    def fake_run_group(spec: dict[str, Any], channel: Any, cancel: Any) -> int:
+        seen["spec"] = spec
+        return 0
+
+    module = sys.modules["ffsubsyncui.core.engines.ffsubsync"] = type(sys)("stub")
+    monkeypatch.setattr(module, "run_group", fake_run_group, raising=False)
+    try:
+        assert dispatch({"items": []}, EventChannel(_Sink()), CancelToken()) == 0
+        assert seen["spec"] == {"items": []}
+    finally:
+        del sys.modules["ffsubsyncui.core.engines.ffsubsync"]
 
 
-def test_overwrite_input_replaces_output_flag() -> None:
-    options = SyncOptions(overwrite_input=True).to_dict()
-    arguments = _args(options=options)
-    assert "--overwrite-input" in arguments
-    # ffsubsync rejects --overwrite-input together with -o.
-    assert "-o" not in arguments
+# -- cancellation --------------------------------------------------------
 
 
-def test_vad_is_passed_for_video_references() -> None:
-    arguments = _args(options=SyncOptions(vad="auditok").to_dict())
-    assert _pairs(arguments, "--vad") == "auditok"
+def test_a_fresh_token_is_not_cancelled() -> None:
+    assert not CancelToken().cancelled
 
 
-def test_vad_is_omitted_for_subtitle_and_speech_references() -> None:
-    """Otherwise ffsubsync warns "Vad specified, but reference was not a movie"."""
-    for reference in ("reference.srt", "cached.npz"):
-        arguments = _args(reference=reference)
-        assert "--vad" not in arguments, reference
+def test_cancel_terminates_an_attached_child() -> None:
+    token = CancelToken()
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    token.attach(child)
+    try:
+        token.cancel()
+        assert child.wait(timeout=10) is not None
+        assert token.cancelled
+    finally:
+        if child.poll() is None:  # pragma: no cover - only on a failed cancel
+            child.kill()
 
 
-def test_optional_arguments_are_omitted_when_unset() -> None:
-    arguments = _args()
-    assert "--split-penalty" not in arguments
-    assert "--max-duration-seconds" not in arguments
-    assert "--multi-segment-sync" not in arguments
+def test_attaching_after_a_cancel_still_reaps_the_child() -> None:
+    """The race that would otherwise leak a process for the full sync."""
+    token = CancelToken()
+    token.cancel()
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        token.attach(child)
+        assert child.wait(timeout=10) is not None
+    finally:
+        if child.poll() is None:  # pragma: no cover - only on a failed cancel
+            child.kill()
 
 
-def test_optional_arguments_appear_when_set() -> None:
-    options = SyncOptions(
-        split_penalty=5.0,
-        max_duration_seconds=600.0,
-        multi_segment_sync=True,
-        segment_count=12,
-        gss=True,
-        no_fix_framerate=True,
-        reference_stream="a:1",
-    ).to_dict()
-    arguments = _args(options=options)
-    assert _pairs(arguments, "--split-penalty") == "5.0"
-    assert _pairs(arguments, "--max-duration-seconds") == "600.0"
-    assert _pairs(arguments, "--segment-count") == "12"
-    assert _pairs(arguments, "--reference-stream") == "a:1"
-    assert "--multi-segment-sync" in arguments
-    assert "--gss" in arguments
-    assert "--no-fix-framerate" in arguments
+def test_cancel_is_safe_with_nothing_attached() -> None:
+    token = CancelToken()
+    token.cancel()
+    token.cancel()
+    token.detach()
+    assert token.cancelled
 
 
-def test_quality_gate_arguments_travel_together() -> None:
-    options = SyncOptions(
-        skip_sync_on_low_quality=True,
-        min_score=2.5,
-        quality_max_offset_seconds=20.0,
-        max_framerate_deviation=0.05,
-    ).to_dict()
-    arguments = _args(options=options)
-    assert "--skip-sync-on-low-quality" in arguments
-    assert _pairs(arguments, "--min-score") == "2.5"
-    assert _pairs(arguments, "--quality-max-offset-seconds") == "20.0"
-    assert _pairs(arguments, "--max-framerate-deviation") == "0.05"
+# -- end to end ----------------------------------------------------------
 
 
-def test_serialize_speech_is_not_an_argv_flag() -> None:
-    """The worker writes the speech array itself.
-
-    ffsubsync's --serialize-speech only fires on its own extraction path, which
-    would defeat sharing one in-memory extraction across the group.
-    """
-    assert "--serialize-speech" not in _args(serialize_speech=True)
-
-
-def test_quality_thresholds_are_omitted_when_the_gate_is_off() -> None:
-    arguments = _args()
-    assert "--skip-sync-on-low-quality" not in arguments
-    assert "--min-score" not in arguments
-
-
-def test_arguments_parse_with_the_real_ffsubsync_parser() -> None:
-    """The strongest check available: ffsubsync's own parser accepts them."""
-    from ffsubsync.ffsubsync import make_parser
-
-    options = SyncOptions(
-        vad="auditok",
-        split_penalty=5.0,
-        multi_segment_sync=True,
-        max_duration_seconds=300.0,
-        skip_sync_on_low_quality=True,
-        reference_stream="a:0",
-        ffmpeg_path=str(Path.cwd()),
-    ).to_dict()
-    arguments = _args(options=options)
-    namespace = make_parser().parse_args(arguments)
-    assert namespace.reference == "ep.mkv"
-    assert namespace.srtin == ["ep.en.srt"]
-    assert namespace.srtout == "ep.en.synced.srt"
-    assert namespace.vad == "auditok"
-    assert namespace.skip_sync_on_low_quality is True
+def _run_worker(stdin_payload: str, *, close_stdin: bool = True) -> tuple[int, str]:
+    process = subprocess.Popen(
+        [sys.executable, "-m", "ffsubsyncui.core.worker"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+    )
+    assert process.stdin is not None
+    process.stdin.write(stdin_payload)
+    process.stdin.flush()
+    if close_stdin:
+        process.stdin.close()
+    output, _ = process.communicate(timeout=60)
+    return process.returncode, output
 
 
-def test_fast_mode_passes_segment_sampling() -> None:
-    """Fast mode is multi-segment sampling, nothing more."""
-    options = SyncOptions(multi_segment_sync=True, segment_count=6).to_dict()
-    arguments = _args(options=options)
-    assert "--multi-segment-sync" in arguments
-    assert _pairs(arguments, "--segment-count") == "6"
-    # --max-duration-seconds is deliberately NOT part of fast mode: truncating
-    # the reference can return a confidently wrong offset.
-    assert "--max-duration-seconds" not in arguments
+def test_a_malformed_spec_is_reported_not_crashed() -> None:
+    code, output = _run_worker("not json at all\n")
+    assert code == 2
+    assert '"event": "fatal"' in output
+
+
+def test_closing_stdin_without_a_spec_exits_promptly() -> None:
+    started = time.monotonic()
+    code, output = _run_worker("")
+    assert code == 2
+    assert "No job spec" in output
+    assert time.monotonic() - started < 30
+
+
+_INHERITS_STDIN = """
+import subprocess, sys
+from ffsubsyncui.core.worker import claim_stdin
+control = claim_stdin()
+# Anything an engine spawns inherits fd 0. If that is still the parent's pipe,
+# a tool that reads stdin (ffmpeg does) blocks until the sync is cancelled.
+child = subprocess.run(
+    [sys.executable, "-c", "import sys; sys.stdin.read()"], timeout=20
+)
+print("child-exit", child.returncode, file=sys.stderr, flush=True)
+print("control", control.readline().strip(), file=sys.stderr, flush=True)
+"""
+
+
+def test_children_inherit_an_empty_stdin_not_the_control_pipe() -> None:
+    """The parent holds stdin open to signal cancel; children must not see it."""
+    process = subprocess.Popen(
+        [sys.executable, "-c", _INHERITS_STDIN],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    assert process.stdin is not None
+    process.stdin.write("still-open\n")
+    process.stdin.flush()
+    try:
+        # The pipe is deliberately left open, exactly as a running sync would.
+        _, errors = process.communicate(timeout=60)
+    except subprocess.TimeoutExpired as exc:  # pragma: no cover - the bug guarded
+        process.kill()
+        raise AssertionError("a spawned child inherited the open control pipe") from exc
+    assert "child-exit 0" in errors
+    # ...and the control channel itself still carries the parent's messages.
+    assert "control still-open" in errors

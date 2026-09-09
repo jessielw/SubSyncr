@@ -68,6 +68,21 @@ _register("ca", "cat", "catalan")
 _register("eu", "baq", "eus", "basque")
 _register("gl", "glg", "galician")
 
+
+def canonical(token: str) -> str | None:
+    """The ISO 639-1 code a language token stands for, if we recognise it.
+
+    Filenames say ``en``; containers say ``eng``; people say ``english``. They
+    all have to compare equal, and a prefix test does not get there - ``es`` is
+    not a prefix of ``spa``, nor ``ja`` of ``jpn``.
+    """
+    cleaned = token.strip().lower().replace("_", "-")
+    if not cleaned:
+        return None
+    # "pt-BR" and "zh-Hans" carry a region or script we do not compare on.
+    return _LANGUAGES.get(cleaned) or _LANGUAGES.get(cleaned.split("-")[0])
+
+
 _FORCED_TOKENS = frozenset({"forced", "force"})
 _SDH_TOKENS = frozenset(
     {"sdh", "cc", "hearingimpaired", "hearing", "impaired", "closedcaptions"}

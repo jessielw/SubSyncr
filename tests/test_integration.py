@@ -12,12 +12,12 @@ import threading
 import time
 
 import pytest
+from support import sync_options
 
 from ffsubsyncui.core.engine import SyncProcess, build_spec, validate
 from ffsubsyncui.core.models import (
     JobStatus,
     SyncJob,
-    SyncOptions,
     SyncResult,
     default_output_for,
 )
@@ -76,7 +76,7 @@ def _job(reference: Path, subtitle: Path, **options: object) -> SyncJob:
         reference_path=reference,
         subtitle_path=subtitle,
         output_path=default_output_for(subtitle),
-        options=SyncOptions(**options),  # type: ignore[arg-type]
+        options=sync_options(**options),  # type: ignore[arg-type]
     )
 
 
@@ -138,7 +138,7 @@ def test_existing_output_is_not_silently_replaced(
     job.output_path.write_text("existing work", encoding="utf-8")
     with pytest.raises(EngineError, match="Output already exists"):
         validate(job)
-    job.options.replace_output = True
+    job.options.files.replace_output = True
     validate(job)
 
 

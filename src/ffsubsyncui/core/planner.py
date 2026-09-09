@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import replace
 import hashlib
 from pathlib import Path
 
@@ -11,7 +10,7 @@ from ffsubsyncui.core.models import (
     MatchResult,
     SyncJob,
     SyncOptions,
-    default_output_for,
+    resolve_output,
 )
 
 
@@ -40,8 +39,8 @@ def build_job(
     return SyncJob(
         reference_path=video,
         subtitle_path=subtitle,
-        output_path=default_output_for(subtitle, output_suffix),
-        options=replace(options),
+        output_path=resolve_output(video, subtitle, options.files, output_suffix),
+        options=options.copy(),
         language=language,
         group_key=group_key if group_key is not None else group_key_for(video),
     )

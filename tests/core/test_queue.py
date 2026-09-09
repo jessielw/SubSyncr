@@ -16,6 +16,7 @@ import pytest
 
 from ffsubsyncui.core import queue as queue_module
 from ffsubsyncui.core.config import AppConfig
+from ffsubsyncui.core.engines import EngineId
 from ffsubsyncui.core.models import JobStatus, SyncJob, SyncResult
 from ffsubsyncui.core.queue import QueueCallbacks, SyncQueue
 from ffsubsyncui.core.speech_cache import SpeechCache
@@ -418,3 +419,141 @@ def test_cancelling_an_unknown_job_is_harmless(
     build_queue: Callable[..., SyncQueue],
 ) -> None:
     assert build_queue().cancel("no such job") is False
+
+
+# -- engine fallback chain -----------------------------------------------
+
+
+class ScriptedProcess(FakeProcess):
+    """A stub whose outcome depends on which engine the queue asked for."""
+
+    # engine id -> status it returns.
+    script: ClassVar[dict[str, JobStatus]] = {}
+    engines_used: ClassVar[list[str]] = []
+
+    def run(
+        self, *, on_progress: Any = None, on_log: Any = None
+    ) -> dict[str, SyncResult]:
+        engine = str(self.spec["engine"])
+        ScriptedProcess.engines_used.append(engine)
+        status = ScriptedProcess.script.get(engine, JobStatus.FAILED)
+        return {
+            item["id"]: SyncResult(
+                status=status,
+                engine=EngineId(engine),
+                error="" if status is JobStatus.SUCCEEDED else "no good",
+            )
+            for item in self.items
+        }
+
+
+@pytest.fixture
+def scripted(monkeypatch: pytest.MonkeyPatch) -> type[ScriptedProcess]:
+    ScriptedProcess.instances = []
+    ScriptedProcess.engines_used = []
+    ScriptedProcess.script = {}
+    monkeypatch.setattr(queue_module, "SyncProcess", ScriptedProcess)
+    return ScriptedProcess
+
+
+def _chained(job: SyncJob, *chain: EngineId) -> SyncJob:
+    job.options.fallback_chain = chain
+    return job
+
+
+def test_a_failure_moves_to_the_next_engine(
+    build_queue: Callable[..., SyncQueue],
+    make_job: Callable[..., SyncJob],
+    scripted: type[ScriptedProcess],
+) -> None:
+    scripted.script = {"ffsubsync": JobStatus.FAILED, "alass": JobStatus.SUCCEEDED}
+    queue = build_queue()
+    job = _chained(make_job("A"), EngineId.ALASS)
+    queue.add([job])
+    _drain(queue)
+    queue.shutdown()
+
+    assert scripted.engines_used == ["ffsubsync", "alass"]
+    assert job.status is JobStatus.SUCCEEDED
+    # History has to say which engine actually produced the file.
+    assert job.result is not None
+    assert job.result.engine is EngineId.ALASS
+
+
+def test_a_success_never_reaches_the_fallback(
+    build_queue: Callable[..., SyncQueue],
+    make_job: Callable[..., SyncJob],
+    scripted: type[ScriptedProcess],
+) -> None:
+    scripted.script = {"ffsubsync": JobStatus.SUCCEEDED, "alass": JobStatus.SUCCEEDED}
+    queue = build_queue()
+    queue.add([_chained(make_job("A"), EngineId.ALASS)])
+    _drain(queue)
+    queue.shutdown()
+    assert scripted.engines_used == ["ffsubsync"]
+
+
+def test_a_low_quality_verdict_is_worth_another_engine(
+    build_queue: Callable[..., SyncQueue],
+    make_job: Callable[..., SyncJob],
+    scripted: type[ScriptedProcess],
+) -> None:
+    """An engine refusing to trust its own answer is exactly when to try another."""
+    scripted.script = {
+        "ffsubsync": JobStatus.SKIPPED_LOW_QUALITY,
+        "lapse": JobStatus.SUCCEEDED,
+    }
+    queue = build_queue()
+    queue.add([_chained(make_job("A"), EngineId.LAPSE)])
+    _drain(queue)
+    queue.shutdown()
+    assert scripted.engines_used == ["ffsubsync", "lapse"]
+
+
+def test_the_chain_stops_when_every_engine_has_had_a_go(
+    build_queue: Callable[..., SyncQueue],
+    make_job: Callable[..., SyncJob],
+    scripted: type[ScriptedProcess],
+) -> None:
+    scripted.script = {}  # Everything fails.
+    queue = build_queue()
+    job = _chained(make_job("A"), EngineId.ALASS, EngineId.LAPSE)
+    queue.add([job])
+    _drain(queue)
+    queue.shutdown()
+    assert scripted.engines_used == ["ffsubsync", "alass", "lapse"]
+    assert job.status is JobStatus.FAILED
+
+
+def test_an_engine_that_cannot_read_the_inputs_is_skipped(
+    build_queue: Callable[..., SyncQueue],
+    make_job: Callable[..., SyncJob],
+    scripted: type[ScriptedProcess],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No point spending a process on autosubsync for a subtitle reference."""
+    scripted.script = {"lapse": JobStatus.SUCCEEDED}
+    monkeypatch.setattr(
+        queue_module,
+        "can_run",
+        lambda job, engine: engine is not EngineId.AUTOSUBSYNC,
+    )
+    queue = build_queue()
+    queue.add([_chained(make_job("A"), EngineId.AUTOSUBSYNC, EngineId.LAPSE)])
+    _drain(queue)
+    queue.shutdown()
+    assert "autosubsync" not in scripted.engines_used
+    assert scripted.engines_used == ["ffsubsync", "lapse"]
+
+
+def test_no_chain_means_a_failure_is_final(
+    build_queue: Callable[..., SyncQueue],
+    make_job: Callable[..., SyncJob],
+    scripted: type[ScriptedProcess],
+) -> None:
+    scripted.script = {}
+    queue = build_queue()
+    queue.add([make_job("A")])
+    _drain(queue)
+    queue.shutdown()
+    assert scripted.engines_used == ["ffsubsync"]

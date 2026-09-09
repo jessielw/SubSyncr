@@ -26,8 +26,9 @@ fills, so the interesting part here is the **matching and review**, not the sync
 - **Fast mode** for long references: sample segments instead of decoding in full.
 - **Subtitle-to-subtitle alignment.** Align against a known-good subtitle
   instead of audio: no ffmpeg, and four episodes in well under a second.
-- **Drag and drop.** Drop folders or files on the window to open a pre-filled
-  review.
+- **Drag and drop.** Drop folders, or a full set of files, on the window to
+  open a pre-filled review; drop a single video or a single subtitle and
+  Add job opens with that file already filled in.
 - **A backup before any in-place overwrite**, and an existing `.bak` is never
   replaced, so re-running cannot bury the true original.
 - **A headless CLI** over the same core, for scripted batches.

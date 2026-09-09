@@ -6,6 +6,7 @@ ORM or a migration framework. Schema versioning rides on ``PRAGMA user_version``
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -14,9 +15,10 @@ import threading
 import time
 from typing import Any
 
+from ffsubsyncui.core.engines import EngineId
 from ffsubsyncui.core.models import JobStatus, SyncJob, SyncOptions, SyncResult
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -28,6 +30,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     subtitle_path   TEXT    NOT NULL,
     output_path     TEXT    NOT NULL,
     options         TEXT    NOT NULL,
+    engine          TEXT    NOT NULL DEFAULT 'ffsubsync',
     language        TEXT,
     group_key       TEXT,
     last_error      TEXT    NOT NULL DEFAULT '',
@@ -42,6 +45,7 @@ CREATE TABLE IF NOT EXISTS history (
     subtitle_path          TEXT NOT NULL,
     output_path            TEXT NOT NULL,
     options                TEXT NOT NULL,
+    engine                 TEXT NOT NULL DEFAULT 'ffsubsync',
     language               TEXT,
     offset_seconds         REAL,
     framerate_scale_factor REAL,
@@ -64,6 +68,9 @@ class HistoryEntry:
     subtitle_path: Path
     output_path: Path
     options: SyncOptions
+    # The engine that produced this result, which a fallback chain can make
+    # different from ``options.engine``.
+    engine: EngineId
     language: str | None
     offset_seconds: float | None
     framerate_scale_factor: float | None
@@ -106,8 +113,17 @@ class JobStore:
         version = int(cursor.fetchone()[0])
         if version >= SCHEMA_VERSION:
             return
-        # Future migrations branch on `version` here. Version 1 is the baseline
-        # created by _SCHEMA above.
+        if version < 2:
+            # Multi-engine: record which aligner a job asks for, and which one
+            # actually produced each result. Databases created by _SCHEMA above
+            # already have the columns, so a duplicate is expected and benign.
+            for table in ("jobs", "history"):
+                # Already present on a database _SCHEMA just created.
+                with contextlib.suppress(sqlite3.OperationalError):
+                    self._connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN engine TEXT NOT NULL"
+                        " DEFAULT 'ffsubsync'"
+                    )
         self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def close(self) -> None:
@@ -141,6 +157,7 @@ class JobStore:
                 str(job.subtitle_path),
                 str(job.output_path),
                 json.dumps(job.options.to_dict(), sort_keys=True),
+                job.options.engine.value,
                 job.language,
                 job.group_key,
                 job.last_error,
@@ -153,9 +170,9 @@ class JobStore:
             self._connection.execute("DELETE FROM jobs")
             self._connection.executemany(
                 "INSERT INTO jobs (id, position, enabled, status, reference_path,"
-                " subtitle_path, output_path, options, language, group_key,"
+                " subtitle_path, output_path, options, engine, language, group_key,"
                 " last_error, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 payload,
             )
             self._connection.commit()
@@ -166,10 +183,10 @@ class JobStore:
         with self._lock:
             self._connection.execute(
                 "INSERT OR REPLACE INTO history (id, finished_at, status,"
-                " reference_path, subtitle_path, output_path, options, language,"
-                " offset_seconds, framerate_scale_factor, score, duration_seconds,"
-                " used_speech_cache, error)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " reference_path, subtitle_path, output_path, options, engine,"
+                " language, offset_seconds, framerate_scale_factor, score,"
+                " duration_seconds, used_speech_cache, error)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job.id,
                     time.time(),
@@ -178,6 +195,7 @@ class JobStore:
                     str(job.subtitle_path),
                     str(job.output_path),
                     json.dumps(job.options.to_dict(), sort_keys=True),
+                    (result.engine or job.options.engine).value,
                     job.language,
                     result.offset_seconds,
                     result.framerate_scale_factor,
@@ -272,6 +290,7 @@ def _history_from_row(row: sqlite3.Row) -> HistoryEntry:
         subtitle_path=Path(str(row["subtitle_path"])),
         output_path=Path(str(row["output_path"])),
         options=SyncOptions.from_dict(json.loads(str(row["options"]))),
+        engine=EngineId.parse(_column(row, "engine")),
         language=row["language"],
         offset_seconds=row["offset_seconds"],
         framerate_scale_factor=row["framerate_scale_factor"],
@@ -280,3 +299,11 @@ def _history_from_row(row: sqlite3.Row) -> HistoryEntry:
         used_speech_cache=bool(row["used_speech_cache"]),
         error=str(row["error"] or ""),
     )
+
+
+def _column(row: sqlite3.Row, name: str) -> Any:
+    """Read a column that may predate the current schema."""
+    try:
+        return row[name]
+    except IndexError:
+        return None

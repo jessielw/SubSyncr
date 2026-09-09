@@ -17,16 +17,22 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any
+from typing import IO, Any
 
+from ffsubsyncui.core import engines, subtitles
+from ffsubsyncui.core.engines import EngineId
 from ffsubsyncui.core.ffmpeg import probe
 from ffsubsyncui.core.models import JobStatus, SyncJob, SyncResult
-from ffsubsyncui.core.scanner import needs_ffmpeg
+from ffsubsyncui.core.scanner import SUBTITLE_REFERENCE_EXTENSIONS, needs_ffmpeg
 
 # job_id (None for group-wide events), fraction, stage
 ProgressCallback = Callable[[str | None, float | None, str], None]
 # job_id (None for group-wide events), level, message
 LogCallback = Callable[[str | None, str, str], None]
+
+# Seconds to let the worker stop cleanly after stdin closes, before
+# escalating to terminate.
+_CANCEL_GRACE = 2.0
 
 # Seconds to wait for a terminated worker to exit before killing it outright.
 _KILL_GRACE = 5.0
@@ -59,6 +65,30 @@ def _creation_flags() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
 
+def capability_problem(job: SyncJob, engine: EngineId | None = None) -> str:
+    """Why this engine cannot handle these files, or "" if it can.
+
+    Shared by validation and the fallback chain: there is no point spending a
+    process on autosubsync for a subtitle reference it cannot read, and the
+    chain needs to know that without trying.
+    """
+    spec = engines.get(engine or job.options.engine)
+    suffix = job.reference_path.suffix.lower()
+    is_subtitle = suffix in SUBTITLE_REFERENCE_EXTENSIONS
+    if not spec.accepts_reference(suffix, is_subtitle=is_subtitle):
+        return f"{spec.label} cannot use {job.reference_path.name} as a reference"
+    # A format the engine cannot read is fine as long as we can convert it on
+    # the way in. Only something that is neither is a dead end.
+    readable = spec.accepts_subtitle(job.subtitle_path.suffix)
+    if not readable and not subtitles.convertible(job.subtitle_path):
+        return f"{spec.label} cannot read {job.subtitle_path.suffix} subtitles"
+    return ""
+
+
+def can_run(job: SyncJob, engine: EngineId) -> bool:
+    return not capability_problem(job, engine)
+
+
 def validate(job: SyncJob) -> None:
     """Reject jobs that cannot possibly succeed, before spending a process."""
     if not job.reference_path.is_file():
@@ -66,13 +96,16 @@ def validate(job: SyncJob) -> None:
     if not job.subtitle_path.is_file():
         raise EngineError(f"Subtitle file is missing: {job.subtitle_path}")
     if (
-        not job.options.overwrite_input
+        not job.options.files.overwrite_input
         and job.output_path.exists()
-        and not job.options.replace_output
+        and not job.options.files.replace_output
     ):
         raise EngineError(f"Output already exists: {job.output_path}")
-    if needs_ffmpeg(job.reference_path):
-        status = probe(job.options.ffmpeg_path)
+    if problem := capability_problem(job):
+        raise EngineError(problem)
+    spec = engines.get(job.options.engine)
+    if spec.needs_ffmpeg and needs_ffmpeg(job.reference_path):
+        status = probe(job.options.environment.ffmpeg_path)
         if not status.ready:
             raise EngineError(status.message)
 
@@ -82,16 +115,21 @@ def build_spec(
     *,
     reference_override: Path | None = None,
     serialize_speech: bool = False,
+    engine: EngineId | None = None,
 ) -> dict[str, Any]:
     """Describe a group of jobs sharing one reference for the worker.
 
     Every job must name the same reference. Options come from the first, since
-    they are what the shared extraction is configured with.
+    they are what the shared extraction is configured with. ``engine`` overrides
+    the configured one, which is how a fallback chain retries the same jobs on a
+    different tool without rewriting anything the user saved.
     """
     if not jobs:
         raise ValueError("a group needs at least one job")
     first = jobs[0]
     return {
+        # The worker dispatches on this to pick an implementation module.
+        "engine": (engine or first.options.engine).value,
         "reference": str(reference_override or first.reference_path),
         "options": first.options.to_dict(),
         "serialize_speech": serialize_speech,
@@ -100,6 +138,8 @@ def build_spec(
                 "id": job.id,
                 "subtitle": str(job.subtitle_path),
                 "output": str(job.output_path),
+                # Lets the embedded-track chooser prefer the same language.
+                "language": job.language or "",
             }
             for job in jobs
         ],
@@ -111,8 +151,11 @@ class SyncProcess:
 
     def __init__(self, spec: dict[str, Any]) -> None:
         self._spec = spec
+        self._engine = EngineId.parse(spec.get("engine"))
         self._job_ids = [str(item["id"]) for item in spec.get("items", [])]
         self._process: subprocess.Popen[str] | None = None
+        # Held open after the spec is sent; closing it is the cancel signal.
+        self._stdin: IO[str] | None = None
         self._lock = threading.Lock()
         self._cancelled = False
         self._stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL)
@@ -122,24 +165,48 @@ class SyncProcess:
         return self._cancelled
 
     def cancel(self) -> None:
-        """Ask the child to stop. Safe to call from another thread, or twice."""
+        """Ask the child to stop. Safe to call from another thread, or twice.
+
+        Three escalating steps. Closing stdin is the graceful one: the worker
+        sees EOF, stops between subtitles, reaps any native tool it spawned, and
+        reports what it already finished. Terminate and kill follow for a worker
+        that is stuck inside an alignment it cannot interrupt.
+        """
         with self._lock:
             self._cancelled = True
             process = self._process
+        self._close_stdin()
         if process is None or process.poll() is not None:
+            return
+        if self._wait_for(process, _CANCEL_GRACE):
             return
         try:
             process.terminate()
         except (OSError, ValueError):
             return  # Already reaped.
-        # Give it a moment to unwind, then stop asking.
-        deadline = time.monotonic() + _KILL_GRACE
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                return
-            time.sleep(0.05)
+        if self._wait_for(process, _KILL_GRACE):
+            return
         with contextlib.suppress(OSError, ValueError):
             process.kill()
+
+    def _close_stdin(self) -> None:
+        """Signal cancellation to the worker. Idempotent."""
+        with self._lock:
+            stream = self._stdin
+            self._stdin = None
+        if stream is not None:
+            with contextlib.suppress(OSError, ValueError):
+                stream.close()
+
+    @staticmethod
+    def _wait_for(process: subprocess.Popen[str], seconds: float) -> bool:
+        """Poll for exit. Returns whether the process is gone."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                return True
+            time.sleep(0.05)
+        return process.poll() is not None
 
     def _drain_stderr(self, stream: Any) -> None:
         with contextlib.suppress(OSError, ValueError):
@@ -196,8 +263,16 @@ class SyncProcess:
 
         try:
             if process.stdin is not None:
-                process.stdin.write(json.dumps(self._spec))
-                process.stdin.close()
+                # One line, and the pipe stays open: the worker reads exactly
+                # this much, then treats EOF on the same pipe as "cancel".
+                process.stdin.write(json.dumps(self._spec) + "\n")
+                process.stdin.flush()
+                with self._lock:
+                    self._stdin = process.stdin
+                if self._cancelled:
+                    # Cancelled while we were starting up; the close above did
+                    # nothing because stdin was not registered yet.
+                    self._close_stdin()
         except (OSError, ValueError) as exc:
             self.cancel()
             return self._fill(
@@ -236,10 +311,11 @@ class SyncProcess:
                     str(event.get("message", "")),
                 )
             elif kind == "result" and job_id is not None:
-                results[job_id] = _result_from(event)
+                results[job_id] = _result_from(event, self._engine)
             elif kind == "fatal":
                 fatal = str(event.get("error", ""))
 
+        self._close_stdin()
         return_code = process.wait()
         stderr_thread.join(timeout=1.0)
 
@@ -282,14 +358,16 @@ class SyncProcess:
                     return_code=return_code,
                     error=error,
                     duration_seconds=elapsed,
+                    engine=self._engine,
                 ),
             )
         return results
 
 
-def _result_from(event: dict[str, Any]) -> SyncResult:
+def _result_from(event: dict[str, Any], engine: EngineId) -> SyncResult:
     reasons = event.get("quality_reasons")
     return SyncResult(
+        engine=engine,
         status=_STATUS_BY_NAME.get(
             str(event.get("status", "failed")), JobStatus.FAILED
         ),

@@ -6,7 +6,7 @@ had a chance to see, correct, or exclude.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Slot
@@ -407,9 +407,10 @@ class BatchMatchDialog(QDialog):
         # Fast mode is a per-batch decision, so it is applied here rather than
         # written back into the saved settings.
         fast = self.fast_mode.isChecked() and not self.subtitle_reference.isChecked()
-        options = (
-            replace(self._options, multi_segment_sync=True) if fast else self._options
-        )
+        options = self._options
+        if fast:
+            options = options.copy()
+            options.ffsubsync.multi_segment_sync = True
         keys: dict[Path, str] = {}
         jobs: list[SyncJob] = []
         for row in self._rows:

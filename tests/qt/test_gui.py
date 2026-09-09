@@ -14,8 +14,10 @@ import threading
 from PySide6.QtCore import QSettings, Qt
 import pytest
 
+from ffsubsyncui.core.config import Theme
 from ffsubsyncui.core.models import JobStatus, SyncJob, SyncResult
 from ffsubsyncui.core.queue import SyncQueue
+from ffsubsyncui.qt.add_job import AddJobDialog
 from ffsubsyncui.qt.main_window import MainWindow
 from ffsubsyncui.qt.match_view import BatchMatchDialog
 from ffsubsyncui.qt.queue_view import (
@@ -209,8 +211,8 @@ def test_settings_round_trip(qtbot, window: MainWindow) -> None:
 
     updated = dialog.config()
     assert updated.concurrency == 4
-    assert updated.sync.vad == "auditok"
-    assert updated.sync.split_penalty == 6.0
+    assert updated.sync.ffsubsync.vad == "auditok"
+    assert updated.sync.ffsubsync.split_penalty == 6.0
     # normalized() restores the leading dot.
     assert updated.output_suffix == ".fixed"
 
@@ -218,8 +220,39 @@ def test_settings_round_trip(qtbot, window: MainWindow) -> None:
 def test_settings_optional_values_stay_unset(qtbot, window: MainWindow) -> None:
     dialog = SettingsDialog(window.config, parent=window)
     qtbot.addWidget(dialog)
-    assert dialog.config().sync.split_penalty is None
-    assert dialog.config().sync.max_duration_seconds is None
+    assert dialog.config().sync.ffsubsync.split_penalty is None
+    assert dialog.config().sync.ffsubsync.max_duration_seconds is None
+
+
+def test_settings_theme_defaults_to_automatic(qtbot, window: MainWindow) -> None:
+    dialog = SettingsDialog(window.config, parent=window)
+    qtbot.addWidget(dialog)
+    assert dialog.config().theme is Theme.AUTOMATIC
+
+
+def test_settings_theme_choice_round_trips(qtbot, window: MainWindow) -> None:
+    dialog = SettingsDialog(window.config, parent=window)
+    qtbot.addWidget(dialog)
+    dialog.theme.setCurrentIndex(dialog.theme.findData(Theme.DARK))
+    assert dialog.config().theme is Theme.DARK
+
+
+def test_cancelling_settings_reverts_the_previewed_theme(
+    qtbot, window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The offscreen QPA platform used for tests doesn't actually report color
+    # scheme changes, so spy on apply_theme rather than styleHints().
+    applied: list[Theme] = []
+    monkeypatch.setattr("ffsubsyncui.qt.settings_view.apply_theme", applied.append)
+
+    dialog = SettingsDialog(window.config, parent=window)
+    qtbot.addWidget(dialog)
+
+    dialog.theme.setCurrentIndex(dialog.theme.findData(Theme.DARK))
+    assert applied == [Theme.DARK]
+
+    dialog.reject()
+    assert applied == [Theme.DARK, Theme.AUTOMATIC]
 
 
 def test_model_refresh_tracks_removals(
@@ -291,11 +324,11 @@ def test_fast_mode_applies_to_the_batch_only(
     dialog.video_folder.set_text(str(folder))
     dialog._scan()
 
-    assert dialog.jobs()[0].options.multi_segment_sync is False
+    assert dialog.jobs()[0].options.ffsubsync.multi_segment_sync is False
     dialog.fast_mode.setChecked(True)
-    assert dialog.jobs()[0].options.multi_segment_sync is True
+    assert dialog.jobs()[0].options.ffsubsync.multi_segment_sync is True
     # The shared settings object is untouched.
-    assert window.config.sync.multi_segment_sync is False
+    assert window.config.sync.ffsubsync.multi_segment_sync is False
 
 
 def test_dropping_files_opens_a_prefilled_review(
@@ -334,6 +367,60 @@ def test_dropping_subtitles_without_a_video_explains_itself(
     assert shown and "video" in shown[0]
 
 
+def test_dropping_a_single_video_opens_add_job_prefilled(
+    qtbot, media_tree: Callable[..., Path], window: MainWindow, monkeypatch
+) -> None:
+    """One video and nothing else is exactly the single-job case."""
+    folder = media_tree(["Show.S01E01.mkv"])
+    captured: list[AddJobDialog] = []
+    monkeypatch.setattr(
+        MainWindow, "_run_add_job_dialog", lambda self, dialog: captured.append(dialog)
+    )
+    window._match_dropped_files(sorted(folder.iterdir()))
+
+    assert captured, "an Add job dialog should have been built"
+    dialog = captured[0]
+    qtbot.addWidget(dialog)
+    assert dialog.reference.text() == str(folder / "Show.S01E01.mkv")
+    assert dialog.subtitle.text() == ""
+
+
+def test_dropping_a_single_subtitle_opens_add_job_prefilled(
+    qtbot, media_tree: Callable[..., Path], window: MainWindow, monkeypatch
+) -> None:
+    """One subtitle and nothing else is exactly the single-job case."""
+    folder = media_tree(["Show.S01E01.en.srt"])
+    captured: list[AddJobDialog] = []
+    monkeypatch.setattr(
+        MainWindow, "_run_add_job_dialog", lambda self, dialog: captured.append(dialog)
+    )
+    window._match_dropped_files(sorted(folder.iterdir()))
+
+    assert captured, "an Add job dialog should have been built"
+    dialog = captured[0]
+    qtbot.addWidget(dialog)
+    assert dialog.subtitle.text() == str(folder / "Show.S01E01.en.srt")
+    assert dialog.reference.text() == ""
+
+
+def test_dropping_multiple_videos_without_subtitles_opens_an_unmatched_review(
+    qtbot, media_tree: Callable[..., Path], window: MainWindow, monkeypatch
+) -> None:
+    """No subtitles at all should not be a dead end for a multi-video drop."""
+    folder = media_tree(["Show.S01E01.mkv", "Show.S01E02.mkv"])
+    captured: list[BatchMatchDialog] = []
+    monkeypatch.setattr(
+        MainWindow, "_run_match_dialog", lambda self, dialog: captured.append(dialog)
+    )
+    window._match_dropped_files(sorted(folder.iterdir()))
+
+    assert captured, "a review dialog should have been built"
+    dialog = captured[0]
+    qtbot.addWidget(dialog)
+    assert dialog.table.rowCount() == 2
+    assert dialog.jobs() == []
+
+
 def test_subtitle_reference_mode_disables_fast_mode(qtbot, window: MainWindow) -> None:
     """Sampling audio makes no sense when the reference is a text file."""
     dialog = BatchMatchDialog(window.config.sync, parent=window)
@@ -344,8 +431,6 @@ def test_subtitle_reference_mode_disables_fast_mode(qtbot, window: MainWindow) -
 
 
 def test_backup_checkbox_follows_overwrite(qtbot, window: MainWindow) -> None:
-    from ffsubsyncui.qt.add_job import AddJobDialog
-
     dialog = AddJobDialog(window.config.sync, parent=window)
     qtbot.addWidget(dialog)
     assert dialog.backup.isEnabled() is False

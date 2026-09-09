@@ -86,11 +86,11 @@ class AddJobDialog(QDialog):
         self.overwrite = QCheckBox("Write over the input subtitle", self)
         self.overwrite.toggled.connect(self._overwrite_toggled)
         self.backup = QCheckBox("Keep a .bak copy of the original", self)
-        self.backup.setChecked(options.backup_before_overwrite)
+        self.backup.setChecked(options.files.backup_before_overwrite)
         self.backup.setEnabled(False)
         self.overwrite.toggled.connect(self.backup.setEnabled)
         self.replace = QCheckBox("Allow replacing an existing output", self)
-        self.replace.setChecked(options.replace_output)
+        self.replace.setChecked(options.files.replace_output)
         self.fast_mode = QCheckBox(
             "Fast mode - sample the audio instead of reading the whole file", self
         )
@@ -180,8 +180,8 @@ class AddJobDialog(QDialog):
         )
         if self.output.text().strip():
             job.output_path = Path(self.output.text().strip())
-        job.options.overwrite_input = self.overwrite.isChecked()
-        job.options.backup_before_overwrite = self.backup.isChecked()
-        job.options.replace_output = self.replace.isChecked()
-        job.options.multi_segment_sync = self.fast_mode.isChecked()
+        job.options.files.overwrite_input = self.overwrite.isChecked()
+        job.options.files.backup_before_overwrite = self.backup.isChecked()
+        job.options.files.replace_output = self.replace.isChecked()
+        job.options.ffsubsync.multi_segment_sync = self.fast_mode.isChecked()
         return job
