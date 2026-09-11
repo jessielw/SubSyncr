@@ -1,34 +1,61 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+import sys
+import sysconfig
 
 from PyInstaller.utils.hooks import collect_all
 
 root = Path(SPECPATH).parent
+
+# The engine registry is importable on its own - it deliberately does not import
+# the implementations - so the spec can ask it which modules to bundle rather
+# than keep a second copy of the list that silently rots.
+sys.path.insert(0, str(root / "src"))
+from subsyncr.core.engines import all_specs  # noqa: E402
+
 ffsubsync_datas, ffsubsync_binaries, ffsubsync_hiddenimports = collect_all("ffsubsync")
+auto_datas, auto_binaries, auto_hiddenimports = collect_all("autosubsync")
+
+datas = [*ffsubsync_datas, *auto_datas]
+
+# autosubsync installs its classifier at the root of site-packages instead of
+# inside the package, so collect_all never sees it. It goes to the root of the
+# bundle, which is where engines.autosubsync.model_path() looks in a frozen
+# build (sys._MEIPASS, and equally the parent of the collected package).
+model = Path(sysconfig.get_path("purelib")) / "trained-model.bin"
+if not model.is_file():
+    raise SystemExit(f"autosubsync's trained model is missing: {model}")
+datas.append((str(model), "."))
 
 hiddenimports = [
     *ffsubsync_hiddenimports,
+    *auto_hiddenimports,
     # These three are imported lazily inside subsyncr.__main__ so that the
     # sync worker never pays to load Qt. Name them explicitly rather than rely
     # on PyInstaller following imports that sit inside a function body.
     "subsyncr.core.worker",
     "subsyncr.cli.main",
     "subsyncr.qt.app",
+    # The worker resolves an engine by the dotted path recorded in its registry
+    # entry, so no import statement anywhere names these for PyInstaller to
+    # follow. Without them a packaged build reports every engine as unavailable.
+    *(engine.module for engine in all_specs()),
 ]
 
 a = Analysis(
     [str(root / "src" / "subsyncr" / "__main__.py")],
     pathex=[str(root / "src")],
-    binaries=ffsubsync_binaries,
-    datas=ffsubsync_datas,
+    binaries=[*ffsubsync_binaries, *auto_binaries],
+    datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[str(root / "packaging" / "hooks")],
     hooksconfig={},
     runtime_hooks=[],
     # ffsubsync only needs torch for the silero and fused VAD backends, which
-    # we do not expose. Bundling it would add hundreds of megabytes.
-    excludes=["torch", "tkinter"],
+    # we do not expose. Bundling it would add hundreds of megabytes. sklearn is
+    # only reachable from autosubsync's training path, never from syncing.
+    excludes=["torch", "tkinter", "sklearn", "scikit-learn"],
     noarchive=False,
     optimize=0,
 )
