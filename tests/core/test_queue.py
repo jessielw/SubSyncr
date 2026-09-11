@@ -130,6 +130,37 @@ def test_failure_is_recorded_on_the_job(
     assert job.last_error == "boom"
 
 
+def test_a_crash_mid_run_fails_the_group_rather_than_hanging(
+    build_queue: Callable[..., SyncQueue],
+    make_job: Callable[..., SyncJob],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected exception must not leave the queue looking busy forever."""
+
+    def explode(self: FakeProcess, **kwargs: Any) -> dict[str, SyncResult]:
+        raise RuntimeError("bug in the queue")
+
+    monkeypatch.setattr(FakeProcess, "run", explode)
+    crashes: list[BaseException | None] = []
+    monkeypatch.setattr(
+        threading, "excepthook", lambda args: crashes.append(args.exc_value)
+    )
+
+    queue = build_queue()
+    queue.add([make_job("A")])
+    _drain(queue)
+
+    job = queue.snapshot()[0]
+    assert job.status is JobStatus.FAILED
+    assert "bug in the queue" in job.last_error
+    # ...and the bug still reaches the hook that reports it, rather than being
+    # quietly absorbed into a failed job.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not crashes:
+        time.sleep(0.01)
+    assert crashes and isinstance(crashes[0], RuntimeError)
+
+
 def test_disabled_jobs_are_left_alone(
     build_queue: Callable[..., SyncQueue], make_job: Callable[..., SyncJob]
 ) -> None:

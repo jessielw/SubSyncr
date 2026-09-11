@@ -38,7 +38,7 @@ from subsyncr.core.config import (
     cache_dir,
     speech_cache_dir,
 )
-from subsyncr.core.engines import EngineKind
+from subsyncr.core.engines import EngineId, EngineKind
 from subsyncr.core.models import (
     LAPSE_MODES,
     VAD_CHOICES,
@@ -598,14 +598,18 @@ class SettingsDialog(QDialog):
         sync.environment = replace(
             sync.environment, ffmpeg_path=self.ffmpeg_field.text()
         )
-        sync.engine = self.engine.currentData()
+        # Qt stores an ``EngineId`` as a plain string, because it is one, and
+        # hands it back that way - so everything read out of a widget has to be
+        # parsed back into the enum before it reaches an option block.
+        sync.engine = EngineId.parse(self.engine.currentData(), sync.engine)
         sync.extract_embedded = self.extract_embedded.isChecked()
         sync.fallback_chain = tuple(
-            item.data(Qt.ItemDataRole.UserRole)
+            fallback
             for index in range(self.fallback.count())
             if (item := self.fallback.item(index)).checkState() is Qt.CheckState.Checked
             # The active engine is already the first thing tried.
-            and item.data(Qt.ItemDataRole.UserRole) is not sync.engine
+            and (fallback := EngineId.parse(item.data(Qt.ItemDataRole.UserRole)))
+            != sync.engine
         )
         sync.alass = replace(
             sync.alass,

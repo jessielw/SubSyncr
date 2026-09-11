@@ -90,6 +90,18 @@ def _batch_key(job: SyncJob) -> str:
     return f"{job.group_key}|{job.reference_path}|{options}"
 
 
+def _crash_results(group: list[SyncJob], exc: Exception) -> dict[str, SyncResult]:
+    """The outcome for a group whose run raised something nobody expected."""
+    return {
+        job.id: SyncResult(
+            status=JobStatus.FAILED,
+            return_code=1,
+            error=f"the queue hit an internal error: {type(exc).__name__}: {exc}",
+        )
+        for job in group
+    }
+
+
 class SyncQueue:
     def __init__(
         self,
@@ -336,38 +348,51 @@ class SyncQueue:
             group = self._claim_group()
             if not group:
                 break
-            results = self._execute(group)
-            with self._lock:
-                for job in group:
-                    result = results.get(
-                        job.id,
-                        SyncResult(
-                            status=JobStatus.FAILED,
-                            return_code=1,
-                            error="the sync worker reported no result for this job",
-                        ),
-                    )
-                    job.result = result
-                    job.status = result.status
-                    job.progress = 1.0 if result.success else None
-                    job.stage = _STAGE_BY_STATUS.get(result.status, "Finished")
-                    job.last_error = result.error
-                    self._processes.pop(job.id, None)
-                self._active_count -= 1
-                idle = self._active_count == 0
-                self._persist()
+            try:
+                results = self._execute(group)
+            except Exception as exc:
+                # Without this the thread dies with the group still marked
+                # Running, and the queue sits there looking busy for the rest
+                # of the session. Fail them first, then let the exception go
+                # on to the thread's excepthook - a bug in here is worth
+                # reporting, not swallowing.
+                self._finish(group, _crash_results(group, exc))
+                raise
+            self._finish(group, results)
+
+    def _finish(self, group: list[SyncJob], results: dict[str, SyncResult]) -> None:
+        """Write a group's outcome back and tell everyone who is listening."""
+        with self._lock:
             for job in group:
-                with contextlib.suppress(Exception):
-                    self._store.record(job, job.result or SyncResult(job.status))
-                self._emit_job_changed(job)
-            self._notify_queue_changed()
-            if idle:
-                # Another worker may still pick something up; only report idle
-                # once nothing is left to claim.
-                with self._lock:
-                    finished = not self._runnable() or not self._draining
-                if finished:
-                    self._emit_running(False)
+                result = results.get(
+                    job.id,
+                    SyncResult(
+                        status=JobStatus.FAILED,
+                        return_code=1,
+                        error="the sync worker reported no result for this job",
+                    ),
+                )
+                job.result = result
+                job.status = result.status
+                job.progress = 1.0 if result.success else None
+                job.stage = _STAGE_BY_STATUS.get(result.status, "Finished")
+                job.last_error = result.error
+                self._processes.pop(job.id, None)
+            self._active_count -= 1
+            idle = self._active_count == 0
+            self._persist()
+        for job in group:
+            with contextlib.suppress(Exception):
+                self._store.record(job, job.result or SyncResult(job.status))
+            self._emit_job_changed(job)
+        self._notify_queue_changed()
+        if idle:
+            # Another worker may still pick something up; only report idle
+            # once nothing is left to claim.
+            with self._lock:
+                finished = not self._runnable() or not self._draining
+            if finished:
+                self._emit_running(False)
 
     def _execute(self, group: list[SyncJob]) -> dict[str, SyncResult]:
         # Validation is per job: one bad subtitle should not sink its siblings.

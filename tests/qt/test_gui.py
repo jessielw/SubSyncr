@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QMenu, QWidget
 import pytest
 
 from subsyncr.core.config import Theme
+from subsyncr.core.engines import EngineId
 from subsyncr.core.models import JobStatus, SyncJob, SyncResult
 from subsyncr.core.queue import SyncQueue
 from subsyncr.qt.add_job import AddJobDialog
@@ -238,6 +239,35 @@ def test_settings_theme_choice_round_trips(qtbot, window: MainWindow) -> None:
     qtbot.addWidget(dialog)
     dialog.theme.setCurrentIndex(dialog.theme.findData(Theme.DARK))
     assert dialog.config().theme is Theme.DARK
+
+
+def test_settings_engine_choice_comes_back_as_the_enum(
+    qtbot, window: MainWindow
+) -> None:
+    # Qt hands a StrEnum back as a bare str, which used to reach SyncOptions and
+    # blow up the first time anything asked the engine for its .value.
+    dialog = SettingsDialog(window.config, parent=window)
+    qtbot.addWidget(dialog)
+    dialog.engine.setCurrentIndex(dialog.engine.findData(EngineId.ALASS))
+
+    sync = dialog.config().sync
+    assert sync.engine is EngineId.ALASS
+    assert sync.identity()["engine"] == "alass"
+
+
+def test_settings_fallback_chain_drops_the_active_engine(
+    qtbot, window: MainWindow
+) -> None:
+    dialog = SettingsDialog(window.config, parent=window)
+    qtbot.addWidget(dialog)
+    dialog.engine.setCurrentIndex(dialog.engine.findData(EngineId.ALASS))
+    for index in range(dialog.fallback.count()):
+        dialog.fallback.item(index).setCheckState(Qt.CheckState.Checked)
+
+    chain = dialog.config().sync.fallback_chain
+    assert all(isinstance(engine, EngineId) for engine in chain)
+    assert EngineId.ALASS not in chain
+    assert EngineId.FFSUBSYNC in chain
 
 
 def test_cancelling_settings_reverts_the_previewed_theme(
