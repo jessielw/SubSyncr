@@ -26,6 +26,7 @@ import tempfile
 
 from subsyncr.core.ffmpeg import probe
 from subsyncr.core.language import canonical
+from subsyncr.core.spawn import creation_flags
 
 # Codecs that are pictures rather than text. Extracting one produces nothing a
 # timestamp comparison can use.
@@ -59,10 +60,6 @@ class Track:
         return self.codec not in IMAGE_CODECS
 
 
-def _creation_flags() -> int:
-    return getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-
-
 def probe_tracks(video: Path, ffmpeg_path: str = "") -> list[Track]:
     """Every subtitle stream ffprobe can see in this file."""
     status = probe(ffmpeg_path)
@@ -90,7 +87,7 @@ def probe_tracks(video: Path, ffmpeg_path: str = "") -> list[Track]:
             errors="replace",
             timeout=_TIMEOUT,
             check=False,
-            creationflags=_creation_flags(),
+            creationflags=creation_flags(),
         )
     except (OSError, subprocess.SubprocessError):
         return []
@@ -189,7 +186,7 @@ def extract(
             errors="replace",
             timeout=_TIMEOUT,
             check=False,
-            creationflags=_creation_flags(),
+            creationflags=creation_flags(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise ExtractionError(f"could not run ffmpeg: {exc}") from exc

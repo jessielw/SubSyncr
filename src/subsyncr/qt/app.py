@@ -56,7 +56,7 @@ def create_application(arguments: Sequence[str] | None = None) -> QApplication:
 
 def run_gui(arguments: Sequence[str] | None = None) -> int:
     from subsyncr.core.config import AppConfig
-    from subsyncr.qt import errors
+    from subsyncr.qt.errors import ErrorReporter
     from subsyncr.qt.main_window import MainWindow
     from subsyncr.qt.theme import ThemeManager, apply_theme
 
@@ -66,7 +66,7 @@ def run_gui(arguments: Sequence[str] | None = None) -> int:
     application = create_application(list(arguments or []))
     # Installed before any window exists, so a failure while building one is
     # still reported rather than leaving a windowless process behind.
-    errors.install()
+    ErrorReporter.install()
     # Created before the theme is applied so the first tint is the right one.
     ThemeManager.for_app(application)
     apply_theme(config.theme, application)

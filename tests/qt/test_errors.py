@@ -10,7 +10,6 @@ from types import TracebackType
 from PySide6.QtWidgets import QMessageBox
 import pytest
 
-from subsyncr.qt import errors
 from subsyncr.qt.errors import ErrorReporter
 
 
@@ -44,7 +43,7 @@ def fresh_hooks(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[object]]:
     chained: list[object] = []
     monkeypatch.setattr(sys, "excepthook", lambda *args: chained.append(args))
     monkeypatch.setattr(threading, "excepthook", lambda args: chained.append(args))
-    monkeypatch.setattr(errors, "_reporter", None)
+    monkeypatch.setattr(ErrorReporter, "_installed", None)
     yield chained
 
 
@@ -61,7 +60,7 @@ def test_a_failure_reaches_a_dialog(
 def test_the_hook_keeps_the_console_report(
     qtbot, boxes: list[QMessageBox], fresh_hooks: list[object]
 ) -> None:
-    errors.install()
+    ErrorReporter.install()
     sys.excepthook(*_failure())
     assert fresh_hooks, "the replaced hook was dropped rather than chained"
     qtbot.waitUntil(lambda: bool(boxes))
@@ -70,7 +69,7 @@ def test_the_hook_keeps_the_console_report(
 def test_a_deliberate_exit_is_not_an_error(
     qapp, boxes: list[QMessageBox], fresh_hooks: list[object]
 ) -> None:
-    errors.install()
+    ErrorReporter.install()
     sys.excepthook(KeyboardInterrupt, KeyboardInterrupt(), None)
     qapp.processEvents()
     assert boxes == []
@@ -79,7 +78,7 @@ def test_a_deliberate_exit_is_not_an_error(
 def test_a_crashing_thread_is_reported_too(
     qtbot, boxes: list[QMessageBox], fresh_hooks: list[object]
 ) -> None:
-    errors.install()
+    ErrorReporter.install()
 
     def explode() -> None:
         raise RuntimeError("off the GUI thread")

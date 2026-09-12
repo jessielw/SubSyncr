@@ -48,6 +48,7 @@ from typing import Any, TextIO
 
 from subsyncr.core import engines
 from subsyncr.core.engines import EngineId
+from subsyncr.core.spawn import ConsoleGuard
 
 
 class EventChannel:
@@ -258,6 +259,11 @@ def dispatch(spec: dict[str, Any], channel: EventChannel, cancel: CancelToken) -
 
 def main(argv: list[str] | None = None) -> int:
     del argv  # The spec arrives on stdin, not the command line.
+    # Engines run in this process and shell out to ffmpeg on their own terms;
+    # without this a packaged build flashes a console window for every call.
+    # Also reached through subsyncr.__main__, but not when this module is run
+    # directly as ``python -m subsyncr.core.worker``.
+    ConsoleGuard.install()
     channel = EventChannel(claim_stdout())
     cancel = CancelToken()
     if sys.stdin is None:

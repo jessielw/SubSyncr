@@ -26,6 +26,7 @@ from typing import Any
 from subsyncr.core import binaries, engines, subtitles
 from subsyncr.core.engines.base import EngineId
 from subsyncr.core.models import OutputPolicy
+from subsyncr.core.spawn import creation_flags
 from subsyncr.core.worker import CancelToken, EventChannel
 
 # "42.5 %" in a progress bar, whatever else the line carries.
@@ -93,11 +94,6 @@ def percent_in(line: str) -> float | None:
         return max(0.0, min(1.0, float(match.group(1)) / 100.0))
     except ValueError:
         return None
-
-
-def creation_flags() -> int:
-    # Without this every native tool flashes a console window on Windows.
-    return getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
 
 def _staging_path(output: Path) -> Path:

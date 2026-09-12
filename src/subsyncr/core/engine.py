@@ -24,6 +24,7 @@ from subsyncr.core.engines import EngineId
 from subsyncr.core.ffmpeg import probe
 from subsyncr.core.models import JobStatus, SyncJob, SyncResult
 from subsyncr.core.scanner import SUBTITLE_REFERENCE_EXTENSIONS, needs_ffmpeg
+from subsyncr.core.spawn import creation_flags
 
 # job_id (None for group-wide events), fraction, stage
 ProgressCallback = Callable[[str | None, float | None, str], None]
@@ -58,11 +59,6 @@ def worker_command() -> list[str]:
         # The packaged executable re-execs itself; see subsyncr.__main__.
         return [sys.executable, "--sync-worker"]
     return [sys.executable, "-m", "subsyncr.core.worker"]
-
-
-def _creation_flags() -> int:
-    # Without this the frozen GUI flashes a console window per job.
-    return getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
 
 def capability_problem(job: SyncJob, engine: EngineId | None = None) -> str:
@@ -243,7 +239,7 @@ class SyncProcess:
                     errors="replace",
                     bufsize=1,
                     env=environment,
-                    creationflags=_creation_flags(),
+                    creationflags=creation_flags(),
                 )
             except OSError as exc:
                 return self._fill(

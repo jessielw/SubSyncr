@@ -29,6 +29,12 @@ class ErrorReporter(QObject):
     # and a widget may only be touched from the GUI thread.
     reported = Signal(str, str)
 
+    # The one reporter the process's hooks feed, once install() has run. It
+    # lives on the class because the thing it guards - sys.excepthook - is
+    # process-wide too, and a second set of hooks would mean two dialogs per
+    # failure.
+    _installed: ErrorReporter | None = None
+
     def __init__(self) -> None:
         super().__init__()
         self._showing = False
@@ -71,42 +77,40 @@ class ErrorReporter(QObject):
         finally:
             self._showing = False
 
+    @classmethod
+    def install(cls) -> ErrorReporter:
+        """Route unhandled exceptions, on any thread, into a dialog.
 
-_reporter: ErrorReporter | None = None
+        Both hooks still chain to the ones they replace, so the console report
+        a developer is watching for is never traded away for the dialog.
+        """
+        if cls._installed is not None:
+            return cls._installed
+        reporter = cls()
+        previous = sys.excepthook
+        previous_threaded = threading.excepthook
 
+        def excepthook(
+            kind: type[BaseException], value: BaseException, tb: TracebackType | None
+        ) -> None:
+            # A windowed build may have no usable stderr at all; whatever that
+            # costs the console, the dialog still has to happen.
+            with contextlib.suppress(Exception):
+                previous(kind, value, tb)
+            # Ctrl+C and a deliberate exit are how a program ends, not a fault.
+            if not issubclass(kind, (KeyboardInterrupt, SystemExit)):
+                reporter.report(kind, value, tb)
 
-def install() -> ErrorReporter:
-    """Route unhandled exceptions, on any thread, into a dialog.
+        def threading_excepthook(args: threading.ExceptHookArgs) -> None:
+            with contextlib.suppress(Exception):
+                previous_threaded(args)
+            if args.exc_value is None or issubclass(args.exc_type, SystemExit):
+                return
+            reporter.report(
+                args.exc_type, args.exc_value, args.exc_traceback, args.thread
+            )
 
-    Both hooks still chain to the ones they replace, so the console report a
-    developer is watching for is never traded away for the dialog.
-    """
-    global _reporter
-    if _reporter is not None:
-        return _reporter
-    reporter = ErrorReporter()
-    previous = sys.excepthook
-    previous_threaded = threading.excepthook
-
-    def excepthook(
-        kind: type[BaseException], value: BaseException, tb: TracebackType | None
-    ) -> None:
-        # A windowed build may have no usable stderr at all; whatever that
-        # costs the console, the dialog still has to happen.
-        with contextlib.suppress(Exception):
-            previous(kind, value, tb)
-        # Ctrl+C and a deliberate exit are how a program ends, not a fault.
-        if not issubclass(kind, (KeyboardInterrupt, SystemExit)):
-            reporter.report(kind, value, tb)
-
-    def threading_excepthook(args: threading.ExceptHookArgs) -> None:
-        with contextlib.suppress(Exception):
-            previous_threaded(args)
-        if args.exc_value is None or issubclass(args.exc_type, SystemExit):
-            return
-        reporter.report(args.exc_type, args.exc_value, args.exc_traceback, args.thread)
-
-    sys.excepthook = excepthook
-    threading.excepthook = threading_excepthook
-    _reporter = reporter
-    return reporter
+        sys.excepthook = excepthook
+        threading.excepthook = threading_excepthook
+        cls._installed = reporter
+        return reporter
