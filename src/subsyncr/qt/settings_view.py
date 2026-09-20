@@ -237,11 +237,14 @@ class SettingsDialog(QDialog):
             )
         self.fallback.setMaximumHeight(FALLBACK_LIST_HEIGHT)
 
-        form = QFormLayout(page)
+        form = QFormLayout()
         form.addRow("Sync engine", self.engine)
         form.addRow("", self._engine_status)
         form.addRow("", self.extract_embedded)
         form.addRow("Fall back to", self.fallback)
+        layout = QVBoxLayout(page)
+        layout.addLayout(form)
+        layout.addStretch(1)
         self._update_engine_status()
         return page
 
@@ -365,13 +368,14 @@ class SettingsDialog(QDialog):
             return
         spec = engines.get(chosen)
         if spec.kind is not EngineKind.BINARY:
-            self._engine_status.setText("Installed with the application.")
+            self._engine_status.hide()
             return
         binary = binaries.spec_for(spec.id)
         if binary is None:
-            self._engine_status.setText("")
+            self._engine_status.hide()
             return
         self._engine_status.setText(binaries.status(binary, cache_dir()).message)
+        self._engine_status.show()
 
     def _alignment_tab(self, options: FFSubSyncOptions) -> QWidget:
         page = QWidget(self)
