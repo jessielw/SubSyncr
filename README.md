@@ -6,7 +6,7 @@ loosely-named subtitle files, working out which belongs to which, letting you ch
 that before anything runs, and then syncing the lot.
 
 Bazarr already handles subtitle sync for a Sonarr/Radarr-managed library, and does
-it well. It cannot help before a library exists — with a pile of loose files whose
+it well. It cannot help before a library exists - with a pile of loose files whose
 names do not line up and no episode records behind them. That gap is what this
 fills, so the interesting part here is the **matching and review**, not the syncing.
 
@@ -14,13 +14,13 @@ fills, so the interesting part here is the **matching and review**, not the sync
 
 - **Review-first batch matching.** Episode identifiers, then exact normalized
   names, then RapidFuzz similarity. Every proposal shows its method, its
-  confidence, and why — including a warning when the runner-up was close.
+  confidence, and why - including a warning when the runner-up was close.
 - **One video, many subtitles.** `ep.en.srt`, `ep.es.srt` and `ep.en.forced.srt`
   all pair with the same video instead of competing for it, and all sync from a
   single audio extraction.
 - **A real queue.** Parallel by default, per-job cancellation, retry,
   crash-recoverable pending work, and searchable history with offsets and scores.
-- **The full ffsubsync option surface** — VAD backend, piecewise `--split-penalty`
+- **The full ffsubsync option surface** - VAD backend, piecewise `--split-penalty`
   alignment, segment sampling, reference stream selection, and the quality gate.
 - **Speech reuse between sessions**, so a language added later skips extraction.
 - **Fast mode** for long references: sample segments instead of decoding in full.
@@ -81,7 +81,7 @@ honest: anything it cannot reach is logic that leaked into the GUI.
 
 `ffsubsync` calls `logging.basicConfig()` at import and reconfigures the root
 logger, and offers no cancellation hook. A subprocess fixes both, makes the
-alignment score — which ffsubsync only logs and never returns — cleanly
+alignment score - which ffsubsync only logs and never returns - cleanly
 recoverable, and returns every byte the sync allocated the moment it exits
 (measured: ~104 MB peak, 0 MB after).
 
@@ -92,8 +92,8 @@ that descriptor, so nothing a dependency prints can corrupt the channel.
 
 Extracting speech from the reference dominates the cost; aligning a parsed
 subtitle against an already-extracted reference is almost free. So one worker
-process handles a whole *group* — one video and every subtitle queued against it
-— building the reference pipeline once with `make_reference_pipe` and reusing it
+process handles a whole *group* - one video and every subtitle queued against it
+- building the reference pipeline once with `make_reference_pipe` and reusing it
 across `try_sync` calls.
 
 Measured on 24 jobs across 8 videos, cold cache:
@@ -113,7 +113,7 @@ stalled or duplicated the work. Owning the group makes that race impossible.
 
 The on-disk speech cache still earns its place, but only *across* runs: sync
 English today and Spanish next week and the second run skips the audio pass. The
-arrays are tiny — 8 videos came to 12 KB.
+arrays are tiny - 8 videos came to 12 KB.
 
 Concurrency defaults to half the logical cores, capped at four. Raise or lower it
 in Settings; on a spinning disk fewer parallel reads may well be faster.
@@ -132,7 +132,7 @@ and `test_gui.py` assert that no widget carries one.
 That leaves the colours Qt cannot know about. Icons are Phosphor glyphs from
 qtawesome, rendered at a fixed colour, so `qt/theme.py`'s `ThemeManager` keeps a
 weak registry of every icon owner and re-tints them from `QPalette.WindowText`
-whenever the scheme changes — guarded with `shiboken6.isValid`, because a PySide
+whenever the scheme changes - guarded with `shiboken6.isValid`, because a PySide
 wrapper can outlive its C++ object. Semantic colours (`qt/palette.py`) come in
 light/dark pairs and are resolved per paint. Qt's dark scheme also derives
 `AlternateBase` from the Windows accent colour, which lands on a navy that reads
