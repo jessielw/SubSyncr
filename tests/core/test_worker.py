@@ -203,7 +203,7 @@ def test_cancel_is_safe_with_nothing_attached() -> None:
 # -- end to end ----------------------------------------------------------
 
 
-def _run_worker(stdin_payload: str, *, close_stdin: bool = True) -> tuple[int, str]:
+def _run_worker(stdin_payload: str) -> tuple[int, str]:
     process = subprocess.Popen(
         [sys.executable, "-m", "subsyncr.core.worker"],
         stdin=subprocess.PIPE,
@@ -212,12 +212,10 @@ def _run_worker(stdin_payload: str, *, close_stdin: bool = True) -> tuple[int, s
         text=True,
         encoding="utf-8",
     )
-    assert process.stdin is not None
-    process.stdin.write(stdin_payload)
-    process.stdin.flush()
-    if close_stdin:
-        process.stdin.close()
-    output, _ = process.communicate(timeout=60)
+    # communicate writes the payload and then closes stdin, which is the EOF
+    # the worker waits for. Closing it ourselves first breaks on POSIX, where
+    # communicate flushes stdin before anything else and a closed file raises.
+    output, _ = process.communicate(stdin_payload, timeout=60)
     return process.returncode, output
 
 
