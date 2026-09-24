@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, QUrl, Slot
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -30,12 +31,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from subsyncr.core import binaries, engines
+from subsyncr.core import binaries, engines, logger
 from subsyncr.core.config import (
     MAX_CONCURRENCY,
     AppConfig,
     Theme,
     cache_dir,
+    log_dir,
     speech_cache_dir,
 )
 from subsyncr.core.engines import EngineId, EngineKind
@@ -209,6 +211,30 @@ class SettingsDialog(QDialog):
         form.addRow("History entries to keep", self.history_limit)
         form.addRow("", self.speech_cache)
         form.addRow("Speech cache", cache_row)
+
+        self.log_level = QComboBox(page)
+        for level in logger.LogLevel:
+            self.log_level.addItem(level.name.capitalize(), level)
+        self.log_level.setCurrentIndex(self.log_level.findData(config.log_level))
+        self.log_level.setToolTip(
+            "Debug records every step of every job - use it when reporting a "
+            "problem, then turn it back down."
+        )
+        self.log_retention = QSpinBox(page)
+        self.log_retention.setRange(1, logger.MAX_RETENTION_DAYS)
+        self.log_retention.setSuffix(" days")
+        self.log_retention.setValue(config.log_retention_days)
+        self.log_retention.setToolTip("A new log file is started each day.")
+        open_logs = QPushButton("Open log folder", page)
+        open_logs.clicked.connect(self._open_log_folder)
+        if self._theme is not None:
+            self._theme.register(open_logs, Icon.OPEN_FOLDER)
+        log_row = QHBoxLayout()
+        log_row.setSpacing(SPACING)
+        log_row.addWidget(self.log_level, 1)
+        log_row.addWidget(open_logs)
+        form.addRow("Log level", log_row)
+        form.addRow("Keep logs for", self.log_retention)
         return page
 
     def _engine_tab(self, options: SyncOptions) -> QWidget:
@@ -608,6 +634,12 @@ class SettingsDialog(QDialog):
             self, "Speech cache", f"Removed {removed} cached speech arrays."
         )
 
+    @Slot()
+    def _open_log_folder(self) -> None:
+        folder = log_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
     # -- result ----------------------------------------------------------
 
     def config(self) -> AppConfig:
@@ -692,5 +724,7 @@ class SettingsDialog(QDialog):
             # Not editable here, but it is a saved setting: dropping it would
             # reset the match dialog's toggle every time settings are saved.
             fast_mode=self._config.fast_mode,
+            log_level=logger.LogLevel(self.log_level.currentData()),
+            log_retention_days=self.log_retention.value(),
         )
         return updated.normalized()

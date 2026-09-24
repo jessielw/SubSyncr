@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 import sys
 import threading
 from types import TracebackType
@@ -10,6 +11,7 @@ from types import TracebackType
 from PySide6.QtWidgets import QMessageBox
 import pytest
 
+from subsyncr.core import logger
 from subsyncr.qt.errors import ErrorReporter
 
 
@@ -108,3 +110,28 @@ def test_one_dialog_at_a_time(
     reporter.report(*_failure())
     qtbot.waitUntil(lambda: bool(shown))
     assert len(shown) == 1
+
+
+def test_a_failure_is_written_to_the_log(
+    qtbot, reporter: ErrorReporter, boxes: list[QMessageBox], tmp_path: Path
+) -> None:
+    path = tmp_path / "subsyncr.log"
+    logger.configure(path)
+    try:
+        reporter.report(*_failure("into the file"))
+        qtbot.waitUntil(lambda: bool(boxes))
+        buttons = [button.text() for button in boxes[0].buttons()]
+        assert "Open log folder" in buttons
+    finally:
+        logger.shutdown()
+    text = path.read_text(encoding="utf-8")
+    assert "RuntimeError: into the file" in text
+    assert "Traceback" in text, "the log carries the traceback, not just the summary"
+
+
+def test_no_log_folder_button_without_a_log(
+    qtbot, reporter: ErrorReporter, boxes: list[QMessageBox]
+) -> None:
+    reporter.report(*_failure())
+    qtbot.waitUntil(lambda: bool(boxes))
+    assert "Open log folder" not in [button.text() for button in boxes[0].buttons()]

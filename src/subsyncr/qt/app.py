@@ -55,14 +55,20 @@ def create_application(arguments: Sequence[str] | None = None) -> QApplication:
 
 
 def run_gui(arguments: Sequence[str] | None = None) -> int:
-    from subsyncr.core.config import AppConfig
+    from subsyncr.core import logger
+    from subsyncr.core.config import AppConfig, log_dir
     from subsyncr.qt.errors import ErrorReporter
     from subsyncr.qt.main_window import MainWindow
     from subsyncr.qt.theme import ThemeManager, apply_theme
 
+    # Before the config is read, so a config that fails to load is logged;
+    # the saved level and retention are applied once it has been.
+    logger.configure(log_dir() / logger.LOG_FILE_NAME)
     # Loaded once here rather than inside MainWindow, so the saved theme is
     # in effect before any widget is created.
     config = AppConfig.load()
+    logger.set_level(config.log_level)
+    logger.set_retention(config.log_retention_days)
     application = create_application(list(arguments or []))
     # Installed before any window exists, so a failure while building one is
     # still reported rather than leaving a windowless process behind.
@@ -72,7 +78,10 @@ def run_gui(arguments: Sequence[str] | None = None) -> int:
     apply_theme(config.theme, application)
     window = MainWindow(config=config)
     window.show()
-    return application.exec()
+    try:
+        return application.exec()
+    finally:
+        logger.shutdown()
 
 
 def main(arguments: Sequence[str] | None = None) -> int:

@@ -11,13 +11,19 @@ hooks put the traceback in front of the user instead.
 from __future__ import annotations
 
 import contextlib
+import logging
 import sys
 import threading
 import traceback
 from types import TracebackType
 
-from PySide6.QtCore import QObject, Qt, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QMessageBox
+
+from subsyncr.core import logger
+
+_log = logging.getLogger(__name__)
 
 _TITLE = "Unexpected error"
 
@@ -54,6 +60,9 @@ class ErrorReporter(QObject):
         summary = f"{kind.__name__}: {value}" if str(value) else kind.__name__
         if thread is not None:
             summary = f"{summary}\n(in background thread {thread.name})"
+        # Written here, on the raising thread, so the traceback reaches the
+        # file even if the dialog never gets the chance to open.
+        _log.error("unhandled exception: %s", summary, exc_info=(kind, value, tb))
         self.reported.emit(summary, "".join(traceback.format_exception(value)))
 
     @Slot(str, str)
@@ -73,7 +82,16 @@ class ErrorReporter(QObject):
             )
             box.setInformativeText(summary)
             box.setDetailedText(detail)
+            box.setStandardButtons(QMessageBox.StandardButton.Close)
+            log_file = logger.current_log_file()
+            open_logs = (
+                box.addButton("Open log folder", QMessageBox.ButtonRole.ActionRole)
+                if log_file is not None
+                else None
+            )
             box.exec()
+            if log_file is not None and box.clickedButton() is open_logs:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_file.parent)))
         finally:
             self._showing = False
 

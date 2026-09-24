@@ -14,8 +14,10 @@ from collections.abc import Callable, Iterable
 import contextlib
 from dataclasses import dataclass
 import json
+import logging
 import threading
 
+from subsyncr.core import logger
 from subsyncr.core.config import AppConfig
 from subsyncr.core.engine import (
     EngineError,
@@ -29,6 +31,8 @@ from subsyncr.core.models import JobStatus, SyncJob, SyncResult
 from subsyncr.core.scanner import needs_ffmpeg
 from subsyncr.core.speech_cache import SpeechCache
 from subsyncr.core.store import JobStore
+
+_log = logging.getLogger(__name__)
 
 _STAGE_BY_STATUS = {
     JobStatus.SUCCEEDED: "Complete",
@@ -88,6 +92,28 @@ def _batch_key(job: SyncJob) -> str:
     # not split a group.
     options = json.dumps(job.options.identity(), sort_keys=True)
     return f"{job.group_key}|{job.reference_path}|{options}"
+
+
+def _log_outcome(job: SyncJob) -> None:
+    result = job.result
+    name = job.subtitle_path.name
+    if job.status is JobStatus.SUCCEEDED and result is not None:
+        offset = (
+            f", offset {result.offset_seconds:+.3f}s"
+            if result.offset_seconds is not None
+            else ""
+        )
+        _log.info(
+            "%s: synced with %s%s -> %s",
+            name,
+            result.engine or "unknown engine",
+            offset,
+            job.effective_output,
+        )
+    elif job.status is JobStatus.FAILED:
+        _log.warning("%s: failed: %s", name, job.last_error or "no reason given")
+    else:
+        _log.info("%s: %s", name, job.status.value)
 
 
 def _crash_results(group: list[SyncJob], exc: Exception) -> dict[str, SyncResult]:
@@ -382,8 +408,11 @@ class SyncQueue:
             idle = self._active_count == 0
             self._persist()
         for job in group:
-            with contextlib.suppress(Exception):
+            _log_outcome(job)
+            try:
                 self._store.record(job, job.result or SyncResult(job.status))
+            except Exception:
+                _log.exception("could not record %s in history", job.subtitle_path)
             self._emit_job_changed(job)
         self._notify_queue_changed()
         if idle:
@@ -493,6 +522,13 @@ class SyncQueue:
         with self._lock:
             for job in runnable:
                 self._processes[job.id] = process
+        _log.info(
+            "%s: %s on %d subtitle(s)%s",
+            first.reference_path.name,
+            engine,
+            len(runnable),
+            " (cached speech)" if used_cache else "",
+        )
 
         try:
             produced = process.run(
@@ -517,8 +553,10 @@ class SyncQueue:
     def _persist(self) -> None:
         if not self._persist_queue:
             return
-        with contextlib.suppress(Exception):
+        try:
             self._store.save_jobs(self._jobs)
+        except Exception:
+            _log.exception("could not save the queue")
 
     def _emit_job_changed(self, job: SyncJob) -> None:
         if self._callbacks.job_changed is not None:
@@ -547,10 +585,15 @@ class SyncQueue:
     def _emit_log(
         self, job_id: str | None, level: str, message: str, group: list[SyncJob]
     ) -> None:
-        if self._callbacks.log is None:
-            return
         # Attribute group-wide lines to the job that is paying for them.
         target = job_id if job_id is not None else group[0].id
+        # The file names the subtitle; the GUI shows the line under its job.
+        subject = next(
+            (job.subtitle_path.name for job in group if job.id == target), target
+        )
+        logger.forward(level, f"{subject}: {message}")
+        if self._callbacks.log is None:
+            return
         with contextlib.suppress(Exception):
             self._callbacks.log(target, level, message)
 

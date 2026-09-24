@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 import contextlib
 from dataclasses import dataclass, field
+import logging
 import os
 from pathlib import Path
 import re
@@ -28,6 +29,8 @@ from subsyncr.core.engines.base import EngineId
 from subsyncr.core.models import OutputPolicy
 from subsyncr.core.spawn import creation_flags
 from subsyncr.core.worker import CancelToken, EventChannel
+
+_log = logging.getLogger(__name__)
 
 # "42.5 %" in a progress bar, whatever else the line carries.
 _PERCENT = re.compile(r"(\d{1,3}(?:\.\d+)?)\s*%")
@@ -76,7 +79,8 @@ def backup_original(subtitle: Path) -> Path | None:
         return target
     try:
         shutil.copy2(subtitle, target)
-    except OSError:
+    except OSError as exc:
+        _log.warning("could not back up %s: %s", subtitle, exc)
         return None
     return target
 

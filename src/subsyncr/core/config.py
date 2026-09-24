@@ -10,14 +10,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 import json
+import logging
 import os
 from pathlib import Path
 import tempfile
 from typing import Any, Self
 
-from platformdirs import user_cache_dir, user_data_dir
+from platformdirs import user_cache_dir, user_data_dir, user_log_dir
 
+from subsyncr.core.logger import DEFAULT_RETENTION_DAYS, MAX_RETENTION_DAYS, LogLevel
 from subsyncr.core.models import SyncOptions
+
+_log = logging.getLogger(__name__)
 
 APP_NAME = "SubSyncr"
 APP_AUTHOR = "SubSyncr"
@@ -85,6 +89,17 @@ def database_path() -> Path:
     return data_dir() / "jobs.db"
 
 
+def log_dir() -> Path:
+    override = os.environ.get(_ENV_DATA_DIR, "").strip()
+    directory = (
+        Path(override).expanduser() / "logs"
+        if override
+        else Path(user_log_dir(APP_NAME, APP_AUTHOR))
+    )
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
 @dataclass(slots=True)
 class AppConfig:
     """Everything the user can change that is not a one-off job detail."""
@@ -101,12 +116,18 @@ class AppConfig:
     auto_start: bool = True
     # Default state of the per-batch "sample the audio" toggle.
     fast_mode: bool = False
+    log_level: LogLevel = LogLevel.INFO
+    # Rotated daily; this many old files are kept beside the current one.
+    log_retention_days: int = DEFAULT_RETENTION_DAYS
 
     def normalized(self) -> Self:
         """Clamp values a hand-edited config file could put out of range."""
         self.concurrency = max(1, min(MAX_CONCURRENCY, int(self.concurrency)))
         self.match_threshold = max(0.0, min(100.0, float(self.match_threshold)))
         self.history_limit = max(0, int(self.history_limit))
+        self.log_retention_days = max(
+            1, min(MAX_RETENTION_DAYS, int(self.log_retention_days))
+        )
         suffix = self.output_suffix.strip()
         if suffix and not suffix.startswith("."):
             suffix = f".{suffix}"
@@ -126,6 +147,8 @@ class AppConfig:
             "history_limit": self.history_limit,
             "auto_start": self.auto_start,
             "fast_mode": self.fast_mode,
+            "log_level": self.log_level.value,
+            "log_retention_days": self.log_retention_days,
         }
 
     @classmethod
@@ -148,6 +171,10 @@ class AppConfig:
             history_limit=_int(value.get("history_limit"), default.history_limit),
             auto_start=bool(value.get("auto_start", default.auto_start)),
             fast_mode=bool(value.get("fast_mode", default.fast_mode)),
+            log_level=LogLevel.parse(value.get("log_level"), default.log_level),
+            log_retention_days=_int(
+                value.get("log_retention_days"), default.log_retention_days
+            ),
         )
         return config.normalized()
 
@@ -156,8 +183,11 @@ class AppConfig:
         target = path or config_path()
         try:
             payload = json.loads(target.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            # A missing or corrupt config must never stop the app starting.
+        except FileNotFoundError:
+            return cls().normalized()
+        except (OSError, json.JSONDecodeError) as exc:
+            # A corrupt config must never stop the app starting.
+            _log.warning("ignoring unreadable config %s: %s", target, exc)
             return cls().normalized()
         return cls.from_dict(payload)
 

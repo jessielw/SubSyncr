@@ -14,6 +14,7 @@ from subsyncr.core.config import (
     Theme,
     default_concurrency,
 )
+from subsyncr.core.logger import MAX_RETENTION_DAYS, LogLevel
 
 
 def test_round_trip(tmp_path: Path) -> None:
@@ -114,3 +115,26 @@ def test_data_dir_honours_the_environment_override(
     assert config_module.data_dir() == tmp_path / "portable"
     assert config_module.database_path().parent == tmp_path / "portable"
     assert config_module.speech_cache_dir().is_dir()
+    assert config_module.log_dir() == tmp_path / "portable" / "logs"
+
+
+def test_log_settings_round_trip(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    AppConfig(log_level=LogLevel.DEBUG, log_retention_days=30).save(path)
+    loaded = AppConfig.load(path)
+    assert loaded.log_level is LogLevel.DEBUG
+    assert loaded.log_retention_days == 30
+
+
+def test_unknown_log_level_falls_back_to_info(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"log_level": "verbose"}), encoding="utf-8")
+    assert AppConfig.load(path).log_level is LogLevel.INFO
+
+
+def test_log_retention_is_clamped() -> None:
+    assert AppConfig(log_retention_days=0).normalized().log_retention_days == 1
+    assert (
+        AppConfig(log_retention_days=10_000).normalized().log_retention_days
+        == MAX_RETENTION_DAYS
+    )

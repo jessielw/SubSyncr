@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -38,6 +39,8 @@ PGS_CODEC = "hdmv_pgs_subtitle"
 
 # What we ask ffmpeg to write. Every engine reads SubRip.
 _EXTRACT_SUFFIX = ".srt"
+
+_log = logging.getLogger(__name__)
 
 _TIMEOUT = 120.0
 
@@ -93,13 +96,21 @@ def probe_tracks(video: Path, ffmpeg_path: str = "") -> list[Track]:
             check=False,
             creationflags=creation_flags(),
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
+        _log.debug("could not probe %s for subtitle tracks: %s", video, exc)
         return []
     if completed.returncode != 0:
+        _log.debug(
+            "ffprobe exited %d on %s: %s",
+            completed.returncode,
+            video,
+            completed.stderr.strip()[-300:],
+        )
         return []
     try:
         payload = json.loads(completed.stdout or "{}")
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        _log.debug("unreadable ffprobe output for %s: %s", video, exc)
         return []
 
     tracks: list[Track] = []

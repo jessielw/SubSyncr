@@ -19,7 +19,7 @@ import threading
 import time
 from typing import IO, Any
 
-from subsyncr.core import engines, subtitles
+from subsyncr.core import engines, logger, subtitles
 from subsyncr.core.engines import EngineId
 from subsyncr.core.ffmpeg import probe
 from subsyncr.core.models import JobStatus, SyncJob, SyncResult
@@ -247,6 +247,7 @@ class SyncProcess:
         environment = dict(os.environ)
         environment["PYTHONIOENCODING"] = "utf-8"
         environment["PYTHONUNBUFFERED"] = "1"
+        environment.update(logger.child_environment())
 
         started = time.monotonic()
         results: dict[str, SyncResult] = {}

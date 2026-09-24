@@ -46,7 +46,7 @@ import tempfile
 import threading
 from typing import Any, TextIO
 
-from subsyncr.core import engines
+from subsyncr.core import engines, logger
 from subsyncr.core.engines import EngineId
 from subsyncr.core.spawn import ConsoleGuard
 
@@ -316,6 +316,13 @@ def main(argv: list[str] | None = None) -> int:
     # directly as ``python -m subsyncr.core.worker``.
     ConsoleGuard.install()
     channel = EventChannel(claim_stdout())
+    # This process never opens the log file; its records travel to the parent,
+    # which writes them beside its own.
+    logger.send_records_to(
+        lambda level, message: channel.emit(
+            "log", job_id=None, level=level, message=message
+        )
+    )
     cancel = CancelToken()
     if sys.stdin is None:
         channel.emit("fatal", error="No job spec: the worker has no stdin")

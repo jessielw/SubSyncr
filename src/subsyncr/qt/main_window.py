@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from subsyncr import __version__
-from subsyncr.core import engines
+from subsyncr.core import engines, logger
 from subsyncr.core.config import (
     AppConfig,
     cache_dir,
@@ -590,6 +590,10 @@ class MainWindow(QMainWindow):
         self.config.speech_cache_enabled = updated.speech_cache_enabled
         self.config.history_limit = updated.history_limit
         self.config.auto_start = updated.auto_start
+        self.config.log_level = updated.log_level
+        self.config.log_retention_days = updated.log_retention_days
+        logger.set_level(updated.log_level)
+        logger.set_retention(updated.log_retention_days)
         self.cache.enabled = updated.speech_cache_enabled
         try:
             self.config.save()

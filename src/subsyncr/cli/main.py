@@ -10,11 +10,12 @@ import argparse
 from collections.abc import Sequence
 import importlib
 import json
+import logging
 from pathlib import Path
 import sys
 import threading
 
-from subsyncr.core import binaries, config as app_config, engines
+from subsyncr.core import binaries, config as app_config, engines, logger
 from subsyncr.core.config import AppConfig
 from subsyncr.core.engines import EngineId
 from subsyncr.core.ffmpeg import probe
@@ -25,6 +26,8 @@ from subsyncr.core.queue import QueueCallbacks, SyncQueue
 from subsyncr.core.scanner import scan_references, scan_subtitles
 from subsyncr.core.speech_cache import SpeechCache
 from subsyncr.core.store import JobStore
+
+_log = logging.getLogger(__name__)
 
 COMMANDS = ("match", "batch", "sync", "history", "doctor")
 
@@ -522,10 +525,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     if handler is None:
         parser.print_help()
         return 2
+    # The terminal already shows what a command is doing; the file is there
+    # for a run nobody watched, the same file the GUI writes.
+    logger.configure(app_config.log_dir() / logger.LOG_FILE_NAME)
+    config = AppConfig.load()
+    logger.set_level(config.log_level)
+    logger.set_retention(config.log_retention_days)
+    _log.info("cli: %s", " ".join(sys.argv[1:] if argv is None else argv))
     try:
         return int(handler(args))
     except KeyboardInterrupt:
+        _log.info("cli: interrupted")
         return 130
+    except Exception:
+        _log.exception("cli: %s failed", args.command)
+        raise
+    finally:
+        logger.shutdown()
 
 
 if __name__ == "__main__":
