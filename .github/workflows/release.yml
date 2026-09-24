@@ -1,0 +1,149 @@
+name: Release
+
+# A v* tag builds every platform and opens a *draft* release with the archives
+# attached, so nothing is public until it has been looked at. A manual run
+# builds the same archives as workflow artifacts and publishes nothing, which
+# is how to dry-run this file.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows-x64
+          # The oldest supported image, so the bundled libraries are linked
+          # against an older glibc and the build runs on more distributions.
+          - os: ubuntu-22.04
+            target: linux-x64
+          - os: macos-14
+            target: macos-arm64
+          - os: macos-15-intel
+            target: macos-x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      # PySide6 loads libEGL and the xkb/xcb libraries even on the offscreen
+      # platform, and PyInstaller has to find them to bundle the Qt plugins.
+      - name: Install Qt system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libfontconfig1 libdbus-1-3 \
+            libxkbcommon0 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 \
+            libxcb-xinerama0 libxcb-randr0 libxcb-render-util0 libxcb-image0
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      # The slow tests spawn real worker processes; the frozen smoke test
+      # below covers that path against the build that actually ships.
+      - name: Test
+        run: uv run pytest -m "not slow"
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          version=$(uv run --no-sync python -c "import subsyncr; print(subsyncr.__version__)")
+          # A tag that disagrees with the code would ship an About box and
+          # log header claiming a different release than the download.
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match __version__ $version"
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+          echo "archive=SubSyncr-$version-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: uv run --group build python build.py
+
+      # The CLI shares the executable, so `doctor` proves the engines were
+      # bundled: a missing hidden import reports an engine as unavailable. On
+      # Windows the executable is windowed and has no stdout to check.
+      - name: Smoke test frozen build
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          SUBSYNCR_DATA_DIR: ${{ runner.temp }}/subsyncr-smoke
+        run: |
+          output=$(dist/SubSyncr/SubSyncr doctor || true)
+          echo "$output"
+          grep -Eq '^  ffsubsync +ready' <<< "$output"
+          grep -Eq '^  autosubsync +ready' <<< "$output"
+
+      - name: Archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          Compress-Archive -Path dist/SubSyncr
+          -DestinationPath "${{ steps.version.outputs.archive }}.zip"
+
+      # tar keeps the executable bit, which a zip made here would lose.
+      - name: Archive (Linux)
+        if: runner.os == 'Linux'
+        run: tar -czf "${{ steps.version.outputs.archive }}.tar.gz" -C dist SubSyncr
+
+      # ditto rather than zip: the .app holds framework symlinks that a plain
+      # zip -r would flatten into copies, breaking the Qt frameworks.
+      - name: Archive (macOS)
+        if: runner.os == 'macOS'
+        run: >-
+          ditto -c -k --sequesterRsrc --keepParent dist/SubSyncr.app
+          "${{ steps.version.outputs.archive }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ steps.version.outputs.archive }}
+          path: ${{ steps.version.outputs.archive }}.*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Draft release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
+        with:
+          draft: true
+          name: SubSyncr ${{ github.ref_name }}
+          files: artifacts/*
+          fail_on_unmatched_files: true
