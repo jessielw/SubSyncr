@@ -12,7 +12,14 @@ root = Path(SPECPATH).parent
 # the implementations - so the spec can ask it which modules to bundle rather
 # than keep a second copy of the list that silently rots.
 sys.path.insert(0, str(root / "src"))
+from subsyncr import __version__  # noqa: E402
 from subsyncr.core.engines import all_specs  # noqa: E402
+
+# Regenerated from the embedded mark by packaging/make_icon.py. macOS wants the
+# .icns for the .app; everywhere else takes the .ico.
+icon = root / "packaging" / "icons" / (
+    "subsyncr.icns" if sys.platform == "darwin" else "subsyncr.ico"
+)
 
 ffsubsync_datas, ffsubsync_binaries, ffsubsync_hiddenimports = collect_all("ffsubsync")
 auto_datas, auto_binaries, auto_hiddenimports = collect_all("autosubsync")
@@ -67,8 +74,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="SubSyncr",
-    # Regenerated from the embedded mark by packaging/make_icon.py.
-    icon=str(root / "packaging" / "icons" / "subsyncr.ico"),
+    icon=str(icon),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -89,3 +95,24 @@ coll = COLLECT(
     upx=False,
     name="SubSyncr",
 )
+
+# A bare onedir folder is not something Finder will launch as an app, so on
+# macOS the same folder is also wrapped as SubSyncr.app. The worker re-exec
+# still works from inside it: sys.executable is Contents/MacOS/SubSyncr. The
+# bundle is unsigned, so Gatekeeper blocks the first launch until the user
+# allows it; the README says how.
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name="SubSyncr.app",
+        icon=str(icon),
+        bundle_identifier="io.github.jessielw.subsyncr",
+        version=__version__,
+        info_plist={
+            "CFBundleDisplayName": "SubSyncr",
+            "CFBundleShortVersionString": __version__,
+            "NSHighResolutionCapable": True,
+            # Follow the system's light/dark setting rather than forcing light.
+            "NSRequiresAquaSystemAppearance": False,
+        },
+    )

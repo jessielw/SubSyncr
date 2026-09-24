@@ -231,11 +231,12 @@ uv run --group build python build.py
 The onedir bundle lands in `dist/SubSyncr`. The executable wears three hats and
 dispatches on its first argument: `--sync-worker` for the child process, a
 subcommand for the CLI, and anything else for the GUI. ffmpeg is deliberately not
-bundled.
+bundled. On macOS the same folder is also wrapped as `dist/SubSyncr.app`,
+unsigned.
 
 The window and executable icons are rendered from the mark embedded in
 `qt/icons.py`, so nothing has to be found on disk at runtime. After changing the
-artwork, regenerate the `.ico` PyInstaller needs at build time with
+artwork, regenerate the `.ico` and `.icns` PyInstaller needs at build time with
 `uv run python packaging/make_icon.py`.
 
 ## Where things are stored

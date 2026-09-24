@@ -2,8 +2,9 @@
 
 The mark itself lives in ``subsyncr.qt.icons.APP_ICON_SVG`` so the running
 application can render it without shipping a data file. PyInstaller, though,
-wants a real ``.ico`` at build time, so this writes one out. Re-run it only
-when the artwork changes; the output is committed.
+wants a real ``.ico`` (Windows) and ``.icns`` (the macOS ``.app``) at build
+time, so this writes both out. Re-run it only when the artwork changes; the
+output is committed.
 
     uv run python packaging/make_icon.py
 """
@@ -24,6 +25,20 @@ from subsyncr.qt.icons import APP_ICON_SVG  # noqa: E402
 
 # Explorer picks the small sizes, the taskbar and alt-tab the large ones.
 SIZES = (16, 24, 32, 48, 64, 128, 256)
+
+# Finder and the Dock want far larger frames than Explorer does. Each entry is
+# an icns type code and the pixel size it holds; the "@2x" types are Retina
+# frames that happen to share a pixel size with a larger 1x one.
+ICNS_TYPES = (
+    (b"ic11", 32),  # 16@2x
+    (b"ic12", 64),  # 32@2x
+    (b"ic07", 128),
+    (b"ic13", 256),  # 128@2x
+    (b"ic08", 256),
+    (b"ic14", 512),  # 256@2x
+    (b"ic09", 512),
+    (b"ic10", 1024),  # 512@2x
+)
 COLOR = "#4f9de0"
 
 
@@ -74,6 +89,21 @@ def build_ico(frames: dict[int, bytes]) -> bytes:
     return header + bytes(directory) + bytes(payload)
 
 
+def build_icns(frames: dict[int, bytes]) -> bytes:
+    """Pack PNG frames into an .icns container.
+
+    Every type in ICNS_TYPES accepts PNG data since OS X 10.7, so like the .ico
+    this is just a header and a list of tagged PNGs - no iconutil, which only
+    exists on a Mac, and no Pillow in the dependency tree.
+    """
+    body = bytearray()
+    for code, size in ICNS_TYPES:
+        data = frames[size]
+        # The length covers the 8-byte entry header as well as the data.
+        body += code + struct.pack(">I", 8 + len(data)) + data
+    return b"icns" + struct.pack(">I", 8 + len(body)) + bytes(body)
+
+
 def main() -> int:
     # Rendering needs a GUI application for the font and paint engines, but
     # not a window, so this runs headless in CI too.
@@ -90,6 +120,12 @@ def main() -> int:
     ico = target / "subsyncr.ico"
     ico.write_bytes(build_ico(frames))
     print(f"wrote {ico} ({ico.stat().st_size} bytes, {len(frames)} sizes)")
+
+    icns_sizes = {size for _, size in ICNS_TYPES}
+    icns_frames = {size: as_png(render(size, renderer)) for size in icns_sizes}
+    icns = target / "subsyncr.icns"
+    icns.write_bytes(build_icns(icns_frames))
+    print(f"wrote {icns} ({icns.stat().st_size} bytes, {len(ICNS_TYPES)} entries)")
 
     png = target / "subsyncr.png"
     png.write_bytes(frames[max(SIZES)])
