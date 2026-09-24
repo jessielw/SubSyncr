@@ -15,7 +15,14 @@ from typing import Any
 
 import pytest
 
-from subsyncr.core.worker import CancelToken, EventChannel, dispatch
+from subsyncr.core import embedded
+from subsyncr.core.embedded import Track
+from subsyncr.core.worker import (
+    CancelToken,
+    EventChannel,
+    dispatch,
+    use_pgs_reference,
+)
 
 
 class _Sink(io.StringIO):
@@ -82,6 +89,66 @@ def test_dispatch_defaults_to_ffsubsync(monkeypatch: pytest.MonkeyPatch) -> None
         assert seen["spec"] == {"items": []}
     finally:
         del sys.modules["subsyncr.core.engines.ffsubsync"]
+
+
+# -- PGS reference --------------------------------------------------------
+
+
+def _pgs_spec(stream: str, reference: str = "ep.mkv") -> dict[str, Any]:
+    return {
+        "engine": "ffsubsync",
+        "reference": reference,
+        "options": {"ffsubsync": {"pgs_ref_stream": stream}},
+        "items": [{"id": "job-1", "language": "en"}],
+    }
+
+
+def _probe_returns(monkeypatch: pytest.MonkeyPatch, tracks: list[Track]) -> None:
+    monkeypatch.setattr(embedded, "probe_tracks", lambda *_: tracks)
+
+
+def test_auto_pgs_resolves_to_a_track(monkeypatch: pytest.MonkeyPatch) -> None:
+    _probe_returns(
+        monkeypatch,
+        [
+            Track(index=0, codec="hdmv_pgs_subtitle", language="fre"),
+            Track(index=1, codec="hdmv_pgs_subtitle", language="eng"),
+        ],
+    )
+    spec = _pgs_spec("auto")
+    use_pgs_reference(spec, EventChannel(_Sink()))
+    assert spec["options"]["ffsubsync"]["pgs_ref_stream"] == "s:1"
+
+
+def test_auto_pgs_without_a_track_falls_back_to_audio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ffsubsync would otherwise fail every job in the group."""
+    _probe_returns(monkeypatch, [Track(index=0, codec="subrip")])
+    spec = _pgs_spec("auto")
+    sink = _Sink()
+    use_pgs_reference(spec, EventChannel(sink))
+    assert spec["options"]["ffsubsync"]["pgs_ref_stream"] == ""
+    assert "using the audio" in sink.events()[-1]["message"]
+
+
+def test_explicit_pgs_stream_is_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    _probe_returns(monkeypatch, [])
+    spec = _pgs_spec("s:3")
+    use_pgs_reference(spec, EventChannel(_Sink()))
+    assert spec["options"]["ffsubsync"]["pgs_ref_stream"] == "s:3"
+
+
+def test_pgs_is_not_probed_for_a_subtitle_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_: object) -> list[Track]:
+        raise AssertionError("probed a subtitle reference")
+
+    monkeypatch.setattr(embedded, "probe_tracks", fail)
+    spec = _pgs_spec("auto", reference="extracted.srt")
+    use_pgs_reference(spec, EventChannel(_Sink()))
+    assert spec["options"]["ffsubsync"]["pgs_ref_stream"] == "auto"
 
 
 # -- cancellation --------------------------------------------------------

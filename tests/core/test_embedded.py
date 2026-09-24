@@ -102,3 +102,20 @@ def test_three_letter_container_tags_match_two_letter_preferences() -> None:
         )
         assert chosen is not None
         assert chosen.language == long, f"{short} should have matched {long}"
+
+
+def test_pgs_choice_skips_text_and_forced_tracks() -> None:
+    """ffsubsync's own auto-detect would take the forced track here."""
+    tracks = [
+        _track(index=0, codec="subrip"),
+        _track(index=1, codec="hdmv_pgs_subtitle", forced=True),
+        _track(index=2, codec="hdmv_pgs_subtitle"),
+    ]
+    chosen = embedded.choose_pgs(tracks)
+    assert chosen is not None
+    assert chosen.index == 2
+
+
+def test_no_pgs_track_means_no_pgs_choice() -> None:
+    tracks = [_track(index=0, codec="subrip"), _track(index=1, codec="dvd_subtitle")]
+    assert embedded.choose_pgs(tracks) is None

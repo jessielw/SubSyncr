@@ -58,6 +58,24 @@ from subsyncr.qt.sizing import (
 from subsyncr.qt.theme import THEME_LABELS, ThemeManager, apply_theme
 from subsyncr.qt.widgets import FFmpegStatusLabel, PathField
 
+# What the image subtitle track box shows for pgs_ref_stream's two named values.
+_PGS_OFF = "Off"
+_PGS_AUTO = "Auto"
+
+
+def _pgs_label(value: str) -> str:
+    if not value:
+        return _PGS_OFF
+    return _PGS_AUTO if value == "auto" else value
+
+
+def _pgs_value(text: str) -> str:
+    """Anything typed that is not a named choice is taken as a stream."""
+    text = text.strip()
+    if not text or text.lower() == _PGS_OFF.lower():
+        return ""
+    return "auto" if text.lower() == _PGS_AUTO.lower() else text
+
 
 class _OptionalDouble(QWidget):
     """A spin box that can also mean "not set", for ffsubsync's optional args."""
@@ -407,6 +425,17 @@ class SettingsDialog(QDialog):
         self.gss.setChecked(options.gss)
         self.reference_stream = QLineEdit(options.reference_stream, page)
         self.reference_stream.setPlaceholderText("for example a:0 or s:1")
+        self.pgs_stream = QComboBox(page)
+        self.pgs_stream.setEditable(True)
+        self.pgs_stream.addItems((_PGS_OFF, _PGS_AUTO))
+        self.pgs_stream.setCurrentText(_pgs_label(options.pgs_ref_stream))
+        self.pgs_stream.setToolTip(
+            "Align against a PGS (Blu-ray) subtitle track's display times "
+            "instead of the audio. Far faster than detecting speech. Auto "
+            "picks the track matching the subtitle's language, skipping forced "
+            "tracks, and falls back to the audio when the video has none. Or "
+            "type a stream such as s:2."
+        )
 
         self.split_penalty = _OptionalDouble(
             options.split_penalty,
@@ -447,6 +476,7 @@ class SettingsDialog(QDialog):
         form.addRow("Speech detector", self.vad)
         form.addRow("Maximum offset", self.max_offset)
         form.addRow("Reference stream", self.reference_stream)
+        form.addRow("Image subtitle track", self.pgs_stream)
         form.addRow("Skip start of reference", self.start_seconds)
         form.addRow("", self.no_fix_framerate)
         form.addRow("", self.gss)
@@ -591,6 +621,7 @@ class SettingsDialog(QDialog):
             no_fix_framerate=self.no_fix_framerate.isChecked(),
             gss=self.gss.isChecked(),
             reference_stream=self.reference_stream.text().strip(),
+            pgs_ref_stream=_pgs_value(self.pgs_stream.currentText()),
             split_penalty=self.split_penalty.value(),
             multi_segment_sync=self.multi_segment.isChecked(),
             segment_count=self.segment_count.value(),

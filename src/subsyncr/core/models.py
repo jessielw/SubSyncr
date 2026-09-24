@@ -215,8 +215,10 @@ class FFSubSyncOptions:
     gss: bool = False
     reference_stream: str = ""
     # Align against the video's PGS (image) subtitle track instead of its audio.
-    # Empty means off; "auto" picks the first hdmv_pgs_subtitle track.
-    pgs_ref_stream: str = ""
+    # Empty means off. "auto" lets the worker pick a track by language, and
+    # falls back to the audio when the video has none - so it is a safe default:
+    # reading PGS timings costs one pass over the file, with no audio decoding.
+    pgs_ref_stream: str = "auto"
     # Piecewise / segmented alignment
     split_penalty: float | None = None
     multi_segment_sync: bool = False
@@ -287,7 +289,7 @@ class FFSubSyncOptions:
 
     def speech_cache_key(
         self,
-    ) -> tuple[str, int, int, float, float | None, bool, int]:
+    ) -> tuple[str, int, int, float, float | None, bool, int, str, str]:
         """Options baked into a serialized ``.npz`` speech array.
 
         Reusing a cached array under different values for any of these would
@@ -301,6 +303,10 @@ class FFSubSyncOptions:
             self.max_duration_seconds,
             self.multi_segment_sync,
             self.segment_count,
+            # Which stream the array was built from: PGS timings and audio
+            # speech from the same file are entirely different arrays.
+            self.reference_stream,
+            self.pgs_ref_stream,
         )
 
 

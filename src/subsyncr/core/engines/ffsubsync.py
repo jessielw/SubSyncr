@@ -121,7 +121,10 @@ def build_arguments(spec: dict[str, Any], item: dict[str, Any]) -> list[str]:
     if stream := str(tuning.get("reference_stream", "")).strip():
         arguments.extend(("--reference-stream", stream))
     # Align against the video's image-based subtitle track rather than its audio.
-    if pgs := str(tuning.get("pgs_ref_stream", "")).strip():
+    # Only a video has one; an extracted text track or cached speech array has
+    # already replaced the reference, and ffprobe would find no PGS in it.
+    pgs = str(tuning.get("pgs_ref_stream", "")).strip()
+    if pgs and needs_ffmpeg(Path(reference)):
         arguments.append("--pgs-ref-stream")
         if pgs != "auto":
             arguments.append(pgs)
@@ -229,6 +232,13 @@ def run_group(spec: dict[str, Any], channel: EventChannel, cancel: CancelToken) 
 
         # The expensive step, paid once for the whole group.
         extraction_started = time.monotonic()
+        if getattr(args, "pgs_ref_stream", None) is not None:
+            # PGS timings come from one ffprobe pass over the whole container,
+            # which reports no progress. Without this the job reads "Starting"
+            # for as long as that takes, and on a large remux that is minutes.
+            channel.emit(
+                "progress", job_id=None, fraction=None, stage="Reading PGS timings"
+            )
         reference_pipe = make_reference_pipe(args, progress_handler=on_progress)
         reference_pipe.fit(args.reference)
         if cancel.cancelled:

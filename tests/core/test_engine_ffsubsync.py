@@ -79,11 +79,44 @@ def test_vad_is_omitted_for_subtitle_and_speech_references() -> None:
         assert "--vad" not in arguments, reference
 
 
+def test_pgs_auto_passes_the_bare_flag() -> None:
+    """ffsubsync auto-detects the track when the flag has no value."""
+    from ffsubsync.ffsubsync import make_parser
+
+    options = sync_options(pgs_ref_stream="auto", ffmpeg_path=str(Path.cwd()))
+    arguments = _args(options=options.to_dict())
+    assert "auto" not in arguments
+    assert make_parser().parse_args(arguments).pgs_ref_stream == "auto"
+
+
+def test_pgs_explicit_stream_is_passed() -> None:
+    arguments = _args(options=sync_options(pgs_ref_stream="s:2").to_dict())
+    assert _pairs(arguments, "--pgs-ref-stream") == "s:2"
+
+
+def test_pgs_is_omitted_for_subtitle_and_speech_references() -> None:
+    """An extracted text track or cached array has no PGS stream to probe."""
+    options = sync_options(pgs_ref_stream="auto").to_dict()
+    for reference in ("reference.srt", "cached.npz"):
+        arguments = _args(reference=reference, options=options)
+        assert "--pgs-ref-stream" not in arguments, reference
+
+
 def test_optional_arguments_are_omitted_when_unset() -> None:
     arguments = _args()
     assert "--split-penalty" not in arguments
     assert "--max-duration-seconds" not in arguments
     assert "--multi-segment-sync" not in arguments
+
+
+def test_pgs_is_on_by_default_for_video_references() -> None:
+    """Auto is safe: the worker falls back to audio when there is no track."""
+    assert "--pgs-ref-stream" in _args()
+
+
+def test_pgs_off_omits_the_flag() -> None:
+    arguments = _args(options=sync_options(pgs_ref_stream="").to_dict())
+    assert "--pgs-ref-stream" not in arguments
 
 
 def test_optional_arguments_appear_when_set() -> None:

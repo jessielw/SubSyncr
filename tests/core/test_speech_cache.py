@@ -53,6 +53,18 @@ def test_extraction_settings_key_the_cache(tmp_path: Path) -> None:
     assert cache.lookup(reference, sync_options(start_seconds=30).ffsubsync) is None
 
 
+def test_source_stream_keys_the_cache(tmp_path: Path) -> None:
+    """PGS timings and audio speech from one video are different arrays."""
+    cache = SpeechCache(tmp_path / "cache")
+    reference = _reference(tmp_path)
+    cache.sidecar_for(reference).write_bytes(b"speech")
+    cache.harvest(reference, sync_options(pgs_ref_stream="").ffsubsync)
+    pgs = sync_options(pgs_ref_stream="auto").ffsubsync
+    second_audio = sync_options(pgs_ref_stream="", reference_stream="a:1").ffsubsync
+    assert cache.lookup(reference, pgs) is None
+    assert cache.lookup(reference, second_audio) is None
+
+
 def test_unrelated_settings_do_not_key_the_cache(tmp_path: Path) -> None:
     cache = SpeechCache(tmp_path / "cache")
     reference = _reference(tmp_path)

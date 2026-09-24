@@ -21,6 +21,14 @@ dependencies = [
 [project.scripts]
 subsyncr = "subsyncr.__main__:main"
 
+[tool.uv.sources]
+# TEMPORARY: the PGS reference fix (MKV packets with no duration) is in
+# smacke/ffsubsync#237 and not yet released. Drop this block once a release
+# includes it. A tagged tarball rather than a git source: uv clones submodules,
+# and ffsubsync's test-data submodule is private. The tag gives versioneer a
+# real version (0.5.1.post1) instead of 0+unknown.
+ffsubsync = { url = "https://github.com/jessielw/ffsubsync/archive/refs/tags/0.5.1.post1.tar.gz" }
+
 [dependency-groups]
 dev = [
     "basedpyright>=1.31",

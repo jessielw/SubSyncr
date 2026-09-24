@@ -11,8 +11,9 @@ user has asked for this, we pull it out with ffmpeg and hand the engine that
 instead of the video. Failure is never fatal: anything that goes wrong falls
 back to the original reference and the sync proceeds on audio.
 
-Image-based tracks (PGS, VobSub) are skipped. There is no text in them to
-compare - ffsubsync has a separate ``--pgs-ref-stream`` path for those.
+Image-based tracks (PGS, VobSub) are skipped here. There is no text in them to
+extract. ffsubsync can still align against a PGS track's display timings with
+``--pgs-ref-stream``; ``choose_pgs`` picks that track by the same rules.
 """
 
 from __future__ import annotations
@@ -31,6 +32,9 @@ from subsyncr.core.spawn import creation_flags
 # Codecs that are pictures rather than text. Extracting one produces nothing a
 # timestamp comparison can use.
 IMAGE_CODECS = frozenset({"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"})
+
+# The Blu-ray bitmap format, the only image codec ffsubsync can read timings from.
+PGS_CODEC = "hdmv_pgs_subtitle"
 
 # What we ask ffmpeg to write. Every engine reads SubRip.
 _EXTRACT_SUFFIX = ".srt"
@@ -133,8 +137,22 @@ def choose(tracks: list[Track], prefer_language: str | None = None) -> Track | N
     AutoSubSync picks by comparing timestamp counts, which needs every candidate
     extracted first. The container already knows all of this.
     """
-    usable = [track for track in tracks if track.is_text]
-    if not usable:
+    return _best([track for track in tracks if track.is_text], prefer_language)
+
+
+def choose_pgs(tracks: list[Track], prefer_language: str | None = None) -> Track | None:
+    """Pick the PGS track whose timings best stand in for the dialogue.
+
+    The same ranking as ``choose``. ffsubsync's own auto-detect takes the first
+    PGS track, which on many discs is a forced-only or commentary track.
+    """
+    return _best(
+        [track for track in tracks if track.codec == PGS_CODEC], prefer_language
+    )
+
+
+def _best(tracks: list[Track], prefer_language: str | None) -> Track | None:
+    if not tracks:
         return None
     wanted = canonical(prefer_language or "")
 
@@ -149,7 +167,7 @@ def choose(tracks: list[Track], prefer_language: str | None = None) -> Track | N
             track.frames,
         )
 
-    return max(usable, key=rank)
+    return max(tracks, key=rank)
 
 
 def extract(

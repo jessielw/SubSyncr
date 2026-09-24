@@ -245,8 +245,8 @@ wheels = [
 
 [[package]]
 name = "ffsubsync"
-version = "0.5.1"
-source = { registry = "https://pypi.org/simple" }
+version = "0.5.1.post1"
+source = { url = "https://github.com/jessielw/ffsubsync/archive/refs/tags/0.5.1.post1.tar.gz" }
 dependencies = [
     { name = "auditok" },
     { name = "chardet" },
@@ -261,9 +261,23 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "webrtcvad-wheels" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/83/0d/6fbf220a6983840ebc2e1684c7a60d56786ccb480d8e9fdc10ad1af73782/ffsubsync-0.5.1.tar.gz", hash = "sha256:91a57724d95839f2e861758852e320789fb003c4f8c3432b3ecd928d9df65eb5", size = 108534, upload-time = "2026-07-24T04:52:50.099Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/3c/23/994f50c4a89f4df2b4aacb6ff72d31dc7ea09d614ef88e13baec2a3d1ae7/ffsubsync-0.5.1-py2.py3-none-any.whl", hash = "sha256:a312ea5d3c7e3e15a13565b2327022e2568ed6f12104b3ecf940ec4566d9ab4e", size = 65508, upload-time = "2026-07-24T04:52:49.041Z" },
+sdist = { hash = "sha256:d557ffa2986ebe09ac62ba3222056a2bf9e02e4be444805076d3ae646965ee3f" }
+
+[package.metadata]
+requires-dist = [
+    { name = "auditok", specifier = "==0.1.5" },
+    { name = "chardet", marker = "python_full_version >= '3.7'" },
+    { name = "charset-normalizer" },
+    { name = "faust-cchardet" },
+    { name = "ffmpeg-python" },
+    { name = "numpy", specifier = ">=1.12.0" },
+    { name = "pysubs2", marker = "python_full_version < '3.7'" },
+    { name = "pysubs2", marker = "python_full_version >= '3.7'", specifier = ">=1.2.0" },
+    { name = "rich" },
+    { name = "srt", specifier = ">=3.0.0" },
+    { name = "tqdm" },
+    { name = "typing-extensions" },
+    { name = "webrtcvad-wheels" },
 ]
 
 [[package]]
@@ -725,7 +739,7 @@ dev = [
 requires-dist = [
     { name = "autosubsync", specifier = ">=1.0,<2" },
     { name = "charset-normalizer", specifier = ">=3.4,<4" },
-    { name = "ffsubsync", specifier = ">=0.5.1,<0.6" },
+    { name = "ffsubsync", url = "https://github.com/jessielw/ffsubsync/archive/refs/tags/0.5.1.post1.tar.gz" },
     { name = "platformdirs", specifier = ">=4.3,<5" },
     { name = "pyside6-essentials", specifier = ">=6.8,<7" },
     { name = "pysubs2", specifier = ">=1.7,<2" },

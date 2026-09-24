@@ -221,6 +221,20 @@ def test_settings_round_trip(qtbot, window: MainWindow) -> None:
     assert updated.output_suffix == ".fixed"
 
 
+def test_settings_pgs_track_round_trip(qtbot, window: MainWindow) -> None:
+    dialog = SettingsDialog(window.config, parent=window)
+    qtbot.addWidget(dialog)
+    assert dialog.pgs_stream.currentText() == "Auto"
+    for shown, stored in ((" s:1 ", "s:1"), ("Off", ""), ("Auto", "auto")):
+        dialog.pgs_stream.setCurrentText(shown)
+        assert dialog.config().sync.ffsubsync.pgs_ref_stream == stored
+
+    window.config.sync.ffsubsync.pgs_ref_stream = ""
+    reopened = SettingsDialog(window.config, parent=window)
+    qtbot.addWidget(reopened)
+    assert reopened.pgs_stream.currentText() == "Off"
+
+
 def test_settings_optional_values_stay_unset(qtbot, window: MainWindow) -> None:
     dialog = SettingsDialog(window.config, parent=window)
     qtbot.addWidget(dialog)

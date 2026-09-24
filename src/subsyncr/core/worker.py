@@ -241,6 +241,56 @@ def use_embedded_reference(
     return extracted
 
 
+def use_pgs_reference(spec: dict[str, Any], channel: EventChannel) -> None:
+    """Resolve ffsubsync's "auto" PGS track, or fall back to the audio.
+
+    Left to itself, ffsubsync takes the first PGS track and fails every job in
+    the group when there is none. Resolving it here picks the track by
+    language, skips forced ones, and turns a missing track into a slower sync
+    rather than a failed one. An explicit stream is the user's call and is
+    passed through untouched.
+    """
+    if str(spec.get("engine", EngineId.FFSUBSYNC.value)) != EngineId.FFSUBSYNC.value:
+        return
+    options: dict[str, Any] = spec.get("options") or {}
+    tuning: dict[str, Any] = options.get("ffsubsync") or {}
+    if str(tuning.get("pgs_ref_stream", "")).strip() != "auto":
+        return
+
+    from subsyncr.core import embedded
+    from subsyncr.core.scanner import needs_ffmpeg
+
+    if not needs_ffmpeg(Path(str(spec["reference"]))):
+        return  # An extracted text track already won; build_arguments skips it.
+
+    environment: dict[str, Any] = options.get("environment") or {}
+    items: list[dict[str, Any]] = list(spec.get("items") or [])
+    language = str(items[0].get("language", "")) if items else ""
+    track = embedded.choose_pgs(
+        embedded.probe_tracks(
+            Path(str(spec["reference"])), str(environment.get("ffmpeg_path", ""))
+        ),
+        language or None,
+    )
+    if track is None:
+        tuning["pgs_ref_stream"] = ""
+        channel.emit(
+            "log",
+            job_id=None,
+            level="INFO",
+            message="no PGS subtitle track in the reference; using the audio",
+        )
+        return
+    tuning["pgs_ref_stream"] = f"s:{track.index}"
+    label = track.language or track.title or f"track {track.index}"
+    channel.emit(
+        "log",
+        job_id=None,
+        level="INFO",
+        message=f"aligning against the {label} PGS subtitle track (s:{track.index})",
+    )
+
+
 def dispatch(spec: dict[str, Any], channel: EventChannel, cancel: CancelToken) -> int:
     """Hand the group to the engine it names."""
     engine = str(spec.get("engine", "ffsubsync"))
@@ -254,6 +304,7 @@ def dispatch(spec: dict[str, Any], channel: EventChannel, cancel: CancelToken) -
         return 2
     with tempfile.TemporaryDirectory(prefix="subsyncr-") as scratch:
         use_embedded_reference(spec, channel, Path(scratch))
+        use_pgs_reference(spec, channel)
         return int(module.run_group(spec, channel, cancel))
 
 

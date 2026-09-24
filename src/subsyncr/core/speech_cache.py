@@ -11,8 +11,9 @@ Two constraints come from ffsubsync itself:
   ``os.path.splitext(reference)[0] + ".npz"``, i.e. beside the media file. We
   move it into our own cache directory afterwards so we never leave debris in
   the user's folders.
-* The array bakes in the VAD, start offset, frame rate, non-speech label and
-  duration limit used to build it, so all of those key the cache.
+* The array bakes in the VAD, start offset, frame rate, non-speech label,
+  duration limit and source stream (audio or PGS) used to build it, so all of
+  those key the cache.
 """
 
 from __future__ import annotations
