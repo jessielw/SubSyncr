@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from subsyncr.core.engines import EngineId
 from subsyncr.core.language import parse_subtitle_tags
 from subsyncr.core.matcher import DEFAULT_THRESHOLD, propose_matches
 from subsyncr.core.models import MatchMethod, SyncJob, SyncOptions
@@ -86,6 +87,10 @@ class BatchMatchDialog(QDialog):
         self._output_suffix = output_suffix
         self._rows: list[_Row] = []
         self._extra_note = ""
+        self._fast_mode_available = (
+            options.engine == EngineId.FFSUBSYNC
+            or EngineId.FFSUBSYNC in options.fallback_chain
+        )
 
         self.video_folder = PathField(caption="Select the video folder", parent=self)
         self.video_folder.set_text(video_folder)
@@ -104,17 +109,13 @@ class BatchMatchDialog(QDialog):
         self.fast_mode = QCheckBox(
             "Fast mode - sample the audio instead of reading the whole file", self
         )
-        self.subtitle_reference.toggled.connect(
-            lambda on: self.fast_mode.setEnabled(not on)
-        )
+        self.subtitle_reference.toggled.connect(self._update_fast_mode_enabled)
         self.fast_mode.setChecked(fast_mode)
         self.fast_mode.setToolTip(
-            "Extracts a handful of short segments spread across the reference "
-            "rather than decoding it end to end. On a long film that is "
-            "dramatically faster for the same answer; on a short episode there "
-            "is little to save. Segment count and intro/outro skipping live in "
-            "Settings, under Alignment."
+            "Samples short audio segments when ffsubsync runs, including as a "
+            "fallback. Adjust the segment count in Settings > ffsubsync."
         )
+        self._update_fast_mode_enabled()
         self.threshold = QDoubleSpinBox(self)
         self.threshold.setRange(0.0, 100.0)
         self.threshold.setSuffix(" %")
@@ -168,22 +169,28 @@ class BatchMatchDialog(QDialog):
         for column in (COLUMN_VIDEO, COLUMN_SUBTITLE, COLUMN_NOTES):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
 
-        choose = QPushButton("Choose subtitle...", self)
-        choose.clicked.connect(self._choose_for_current)
-        clear = QPushButton("Clear pairing", self)
-        clear.clicked.connect(self._clear_selected)
+        self._choose_button = QPushButton("Choose subtitle...", self)
+        self._choose_button.clicked.connect(self._choose_for_current)
+        self._clear_button = QPushButton("Clear pairing", self)
+        self._clear_button.clicked.connect(self._clear_selected)
         if self._theme is not None:
-            self._theme.register(choose, Icon.CHOOSE)
-            self._theme.register(clear, Icon.CLEAR)
-        include_all = QPushButton("Queue all matched", self)
-        include_all.clicked.connect(lambda: self._set_include_all(True))
-        exclude_all = QPushButton("Queue none", self)
-        exclude_all.clicked.connect(lambda: self._set_include_all(False))
+            self._theme.register(self._choose_button, Icon.CHOOSE)
+            self._theme.register(self._clear_button, Icon.CLEAR)
+        self._include_all_button = QPushButton("Queue all matched", self)
+        self._include_all_button.clicked.connect(lambda: self._set_include_all(True))
+        self._exclude_all_button = QPushButton("Queue none", self)
+        self._exclude_all_button.clicked.connect(lambda: self._set_include_all(False))
 
         actions = QHBoxLayout()
-        for button in (choose, clear, include_all, exclude_all):
+        for button in (
+            self._choose_button,
+            self._clear_button,
+            self._include_all_button,
+            self._exclude_all_button,
+        ):
             actions.addWidget(button)
         actions.addStretch(1)
+        self.table.itemSelectionChanged.connect(self._update_row_actions)
 
         self.summary = QLabel("Choose folders and scan.", self)
         buttons = QDialogButtonBox(
@@ -203,6 +210,25 @@ class BatchMatchDialog(QDialog):
         layout.addLayout(actions)
         layout.addWidget(self.summary)
         layout.addWidget(buttons)
+        self._update_row_actions()
+
+    @Slot()
+    def _update_fast_mode_enabled(self) -> None:
+        self.fast_mode.setEnabled(
+            self._fast_mode_available and not self.subtitle_reference.isChecked()
+        )
+
+    @Slot()
+    def _update_row_actions(self) -> None:
+        rows = [index for index in self._current_rows() if index < len(self._rows)]
+        self._choose_button.setEnabled(len(rows) == 1)
+        self._clear_button.setEnabled(
+            any(self._rows[index].subtitle is not None for index in rows)
+        )
+        self._include_all_button.setEnabled(
+            any(row.subtitle is not None and not row.include for row in self._rows)
+        )
+        self._exclude_all_button.setEnabled(any(row.include for row in self._rows))
 
     # -- scanning --------------------------------------------------------
 
@@ -401,13 +427,14 @@ class BatchMatchDialog(QDialog):
             parts.append(f"{ambiguous} need a second look")
         self.summary.setText("  -  ".join(parts) + self._extra_note)
         self._ok_button.setEnabled(queued > 0)
+        self._update_row_actions()
 
     # -- result ----------------------------------------------------------
 
     def jobs(self) -> list[SyncJob]:
         # Fast mode is a per-batch decision, so it is applied here rather than
         # written back into the saved settings.
-        fast = self.fast_mode.isChecked() and not self.subtitle_reference.isChecked()
+        fast = self.fast_mode.isEnabled() and self.fast_mode.isChecked()
         options = self._options
         if fast:
             options = options.copy()

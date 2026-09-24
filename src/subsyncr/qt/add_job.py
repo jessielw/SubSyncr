@@ -16,9 +16,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from subsyncr.core.engines import EngineId
 from subsyncr.core.language import parse_subtitle_tags
 from subsyncr.core.models import SyncJob, SyncOptions, default_output_for
 from subsyncr.core.planner import build_job
+from subsyncr.core.scanner import SUBTITLE_REFERENCE_EXTENSIONS
 from subsyncr.qt.sizing import SIZE_ADD_JOB, SPACING
 from subsyncr.qt.widgets import MEDIA_FILTER, SUBTITLE_FILTER, PathField
 
@@ -42,6 +44,10 @@ class AddJobDialog(QDialog):
         self._options = options
         self._output_suffix = output_suffix
         self._output_edited = False
+        self._fast_mode_available = (
+            options.engine == EngineId.FFSUBSYNC
+            or EngineId.FFSUBSYNC in options.fallback_chain
+        )
 
         self.reference = PathField(
             file_filter=MEDIA_FILTER,
@@ -70,11 +76,8 @@ class AddJobDialog(QDialog):
         )
         self.fast_mode.setChecked(fast_mode)
         self.fast_mode.setToolTip(
-            "Extracts a handful of short segments spread across the reference "
-            "rather than decoding it end to end. On a long film that is "
-            "dramatically faster for the same answer; on a short episode there "
-            "is little to save. Segment count and intro/outro skipping live in "
-            "Settings, under Alignment."
+            "Samples short audio segments when ffsubsync runs, including as a "
+            "fallback. Adjust the segment count in Settings > ffsubsync."
         )
         self.hint = QLabel(self)
         self.hint.setWordWrap(True)
@@ -128,6 +131,13 @@ class AddJobDialog(QDialog):
     def _validate(self) -> None:
         reference = Path(self.reference.text()) if self.reference.text() else None
         subtitle = Path(self.subtitle.text()) if self.subtitle.text() else None
+        self.fast_mode.setEnabled(
+            self._fast_mode_available
+            and (
+                reference is None
+                or reference.suffix.lower() not in SUBTITLE_REFERENCE_EXTENSIONS
+            )
+        )
         problems: list[str] = []
         if reference is None or not reference.is_file():
             problems.append("Choose an existing reference file.")
@@ -157,5 +167,7 @@ class AddJobDialog(QDialog):
         job.options.files.overwrite_input = self.overwrite.isChecked()
         job.options.files.backup_before_overwrite = self.backup.isChecked()
         job.options.files.replace_output = self.replace.isChecked()
-        job.options.ffsubsync.multi_segment_sync = self.fast_mode.isChecked()
+        job.options.ffsubsync.multi_segment_sync = (
+            self.fast_mode.isEnabled() and self.fast_mode.isChecked()
+        )
         return job

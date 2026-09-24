@@ -10,7 +10,7 @@ from PySide6.QtCore import (
     Qt,
     Slot,
 )
-from PySide6.QtGui import QIcon, QPainter
+from PySide6.QtGui import QIcon, QPainter, QPaintEvent, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -350,6 +350,20 @@ class JobTableView(QTableView):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         for column in (COLUMN_REFERENCE, COLUMN_SUBTITLE, COLUMN_RESULT):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        super().paintEvent(event)
+        if self.model() is None or self.model().rowCount() != 0:
+            return
+        painter = QPainter(self.viewport())
+        painter.setPen(self.palette().color(QPalette.ColorRole.PlaceholderText))
+        painter.drawText(
+            self.viewport().rect().adjusted(24, 24, -24, -24),
+            Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+            "No jobs yet\n"
+            "Use Match folders to review a batch, or Add job for one pair.",
+        )
+        painter.end()
 
     def selected_rows(self) -> list[int]:
         selection = self.selectionModel()

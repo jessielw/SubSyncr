@@ -13,7 +13,7 @@ import threading
 
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QMenu, QWidget
+from PySide6.QtWidgets import QApplication, QMenu, QToolBar, QWidget
 import pytest
 
 from subsyncr.core.config import Theme
@@ -261,6 +261,13 @@ def test_settings_fallback_chain_drops_the_active_engine(
     dialog = SettingsDialog(window.config, parent=window)
     qtbot.addWidget(dialog)
     dialog.engine.setCurrentIndex(dialog.engine.findData(EngineId.ALASS))
+    active = next(
+        dialog.fallback.item(index)
+        for index in range(dialog.fallback.count())
+        if dialog.fallback.item(index).data(Qt.ItemDataRole.UserRole) == EngineId.ALASS
+    )
+    assert not active.flags() & Qt.ItemFlag.ItemIsEnabled
+    assert active.checkState() is Qt.CheckState.Unchecked
     for index in range(dialog.fallback.count()):
         dialog.fallback.item(index).setCheckState(Qt.CheckState.Checked)
 
@@ -463,6 +470,51 @@ def test_subtitle_reference_mode_disables_fast_mode(qtbot, window: MainWindow) -
     assert dialog.fast_mode.isEnabled() is False
 
 
+def test_fast_mode_only_available_when_ffsubsync_can_run(
+    qtbot, window: MainWindow
+) -> None:
+    options = window.config.sync.copy()
+    options.engine = EngineId.ALASS
+    options.fallback_chain = ()
+    single = AddJobDialog(options, fast_mode=True, parent=window)
+    batch = BatchMatchDialog(options, fast_mode=True, parent=window)
+    qtbot.addWidget(single)
+    qtbot.addWidget(batch)
+    assert not single.fast_mode.isEnabled()
+    assert not batch.fast_mode.isEnabled()
+
+    options.fallback_chain = (EngineId.FFSUBSYNC,)
+    single_with_fallback = AddJobDialog(options, parent=window)
+    batch_with_fallback = BatchMatchDialog(options, parent=window)
+    qtbot.addWidget(single_with_fallback)
+    qtbot.addWidget(batch_with_fallback)
+    assert single_with_fallback.fast_mode.isEnabled()
+    assert batch_with_fallback.fast_mode.isEnabled()
+
+    single_with_fallback.reference.set_text("reference.srt")
+    assert not single_with_fallback.fast_mode.isEnabled()
+    single_with_fallback.reference.set_text("reference.mkv")
+    assert single_with_fallback.fast_mode.isEnabled()
+
+
+def test_match_actions_wait_for_pairings(
+    qtbot, media_tree: Callable[..., Path], window: MainWindow
+) -> None:
+    dialog = BatchMatchDialog(window.config.sync, parent=window)
+    qtbot.addWidget(dialog)
+    assert not dialog._choose_button.isEnabled()
+    assert not dialog._clear_button.isEnabled()
+    assert not dialog._include_all_button.isEnabled()
+    assert not dialog._exclude_all_button.isEnabled()
+
+    folder = media_tree(["Show.S01E01.mkv", "Show.S01E01.en.srt"])
+    dialog.load_files([folder / "Show.S01E01.mkv"], [folder / "Show.S01E01.en.srt"])
+    assert dialog._exclude_all_button.isEnabled()
+    dialog.table.selectRow(0)
+    assert dialog._choose_button.isEnabled()
+    assert dialog._clear_button.isEnabled()
+
+
 def test_backup_checkbox_follows_overwrite(qtbot, window: MainWindow) -> None:
     dialog = AddJobDialog(window.config.sync, parent=window)
     qtbot.addWidget(dialog)
@@ -493,6 +545,17 @@ def test_toolbar_actions_all_carry_an_icon_and_a_tip(window: MainWindow) -> None
         assert action.statusTip(), action.text()
 
 
+def test_settings_stays_visible_in_the_toolbar_at_minimum_width(
+    window: MainWindow,
+) -> None:
+    window.resize(960, 600)
+    window.show()
+    QApplication.processEvents()
+    toolbar = window.findChild(QToolBar)
+    assert toolbar is not None
+    assert toolbar.widgetForAction(window.settings_action).isVisible()
+
+
 def test_menu_bar_reuses_the_toolbar_actions(window: MainWindow) -> None:
     """Sharing the objects is what keeps enabled state in one place."""
     titles = [menu.title() for menu in window.menuBar().findChildren(QMenu)]
@@ -514,26 +577,34 @@ def test_no_widget_in_the_window_sets_a_stylesheet(window: MainWindow) -> None:
         assert not widget.styleSheet(), widget.objectName() or widget
 
 
-def test_splitter_position_survives_a_restart() -> None:
+def test_splitter_position_survives_a_restart(tmp_path: Path) -> None:
     """QMainWindow.saveState does not cover the central widget, so the log
     pane used to reset on every launch.
 
     Both windows are owned outright rather than taken from the fixture: this
     has to close one for real, and closing twice would tear the store down
-    twice.
+    twice. An INI file keeps the test independent of registry permissions.
     """
-    settings = QSettings("SubSyncr-tests", "splitter")
-    settings.clear()
+    settings = QSettings(str(tmp_path / "splitter.ini"), QSettings.Format.IniFormat)
 
     first = MainWindow(settings=settings)
     first.resize(1000, 800)
+    first.show()
+    QApplication.processEvents()
     first.splitter.setSizes([700, 100])
     saved = first.splitter.sizes()
     first.close()
 
     second = MainWindow(settings=settings)
     try:
-        assert second.splitter.sizes() == saved
+        second.show()
+        QApplication.processEvents()
+        restored = second.splitter.sizes()
+        # Qt stores the split ratio; window chrome can change the available
+        # pixel height when the second window is shown.
+        assert restored[0] / sum(restored) == pytest.approx(
+            saved[0] / sum(saved), abs=0.01
+        )
     finally:
         second.close()
         settings.clear()

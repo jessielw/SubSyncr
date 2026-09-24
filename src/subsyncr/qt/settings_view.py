@@ -366,6 +366,16 @@ class SettingsDialog(QDialog):
         chosen = self.engine.currentData()
         if chosen is None:
             return
+        for index in range(self.fallback.count()):
+            item = self.fallback.item(index)
+            active = item.data(Qt.ItemDataRole.UserRole) == chosen
+            if active:
+                item.setCheckState(Qt.CheckState.Unchecked)
+            item.setFlags(
+                item.flags() & ~Qt.ItemFlag.ItemIsEnabled
+                if active
+                else item.flags() | Qt.ItemFlag.ItemIsEnabled
+            )
         spec = engines.get(chosen)
         if spec.kind is not EngineKind.BINARY:
             self._engine_status.hide()

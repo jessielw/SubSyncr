@@ -248,9 +248,8 @@ class MainWindow(QMainWindow):
 
         for group in (
             (self.match_action, self.add_action),
-            (self.remove_action, self.retry_action, self.clear_action),
             (self.start_action, self.stop_action, self.cancel_action),
-            (self.history_action, self.settings_action),
+            (self.settings_action, self.history_action),
         ):
             if toolbar.actions():
                 toolbar.addSeparator()
