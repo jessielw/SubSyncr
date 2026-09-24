@@ -13,6 +13,7 @@ from PySide6.QtCore import QObject, QSize, Slot
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -21,6 +22,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from subsyncr.core import engines
+from subsyncr.core.engines import EngineId
 from subsyncr.core.ffmpeg import probe
 from subsyncr.core.scanner import (
     MEDIA_EXTENSIONS,
@@ -112,6 +115,26 @@ class PathField(QWidget):
             )
         if selected:
             self.set_text(selected)
+
+
+class EngineCombo(QComboBox):
+    """Every registered engine, for picking which one a batch runs with."""
+
+    def __init__(self, engine: EngineId, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._default = engine
+        for spec in engines.all_specs():
+            self.addItem(spec.label, spec.id)
+        self.set_engine(engine)
+
+    def engine(self) -> EngineId:
+        # Qt hands enum item data back as a plain str; parse it back.
+        return EngineId.parse(self.currentData(), self._default)
+
+    def set_engine(self, engine: EngineId) -> None:
+        index = self.findData(engine)
+        if index >= 0:
+            self.setCurrentIndex(index)
 
 
 class FFmpegStatusLabel(QLabel):

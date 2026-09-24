@@ -38,6 +38,7 @@ from subsyncr.core.config import (
     database_path,
     speech_cache_dir,
 )
+from subsyncr.core.engines import EngineId
 from subsyncr.core.models import JobStatus, SyncJob
 from subsyncr.core.queue import QueueCounts, SyncQueue
 from subsyncr.core.scanner import MEDIA_EXTENSIONS, SUBTITLE_EXTENSIONS
@@ -466,7 +467,9 @@ class MainWindow(QMainWindow):
         # Remember the folders either way, so a cancelled scan is not retyped.
         self.settings.setValue("match/videoFolder", dialog.video_folder.text())
         self.settings.setValue("match/subtitleFolder", dialog.subtitle_folder.text())
-        self._remember_fast_mode(dialog.fast_mode.isChecked())
+        self._remember_batch_choices(
+            dialog.fast_mode.isChecked(), dialog.engine.engine()
+        )
         if accepted:
             self._queue_jobs(dialog.jobs(), "Queued")
 
@@ -503,18 +506,22 @@ class MainWindow(QMainWindow):
 
     def _run_add_job_dialog(self, dialog: AddJobDialog) -> None:
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._remember_fast_mode(dialog.fast_mode.isChecked())
+            self._remember_batch_choices(
+                dialog.fast_mode.isChecked(), dialog.engine.engine()
+            )
             self._queue_jobs([dialog.job()], "Queued")
 
     @Slot()
     def _add_job(self) -> None:
         self._run_add_job_dialog(self._build_add_job_dialog())
 
-    def _remember_fast_mode(self, enabled: bool) -> None:
-        """Carry a per-batch choice into the next batch."""
-        if enabled == self.config.fast_mode:
+    def _remember_batch_choices(self, fast_mode: bool, engine: EngineId) -> None:
+        """Carry per-batch choices into the next batch."""
+        if fast_mode == self.config.fast_mode and engine is self.config.sync.engine:
             return
-        self.config.fast_mode = enabled
+        self.config.fast_mode = fast_mode
+        # The dialog's pick becomes the default, so Settings shows it too.
+        self.config.sync.engine = engine
         with contextlib.suppress(OSError):
             self.config.save()
 

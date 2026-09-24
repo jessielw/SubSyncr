@@ -31,6 +31,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from subsyncr.core import engines
+from subsyncr.core.engine import capability_problem, first_capable
 from subsyncr.core.engines import EngineId
 from subsyncr.core.language import parse_subtitle_tags
 from subsyncr.core.matcher import DEFAULT_THRESHOLD, propose_matches
@@ -41,7 +43,12 @@ from subsyncr.qt.icons import Icon
 from subsyncr.qt.palette import ambiguous_color, unmatched_color
 from subsyncr.qt.sizing import SIZE_MATCH, SPACING
 from subsyncr.qt.theme import ThemeManager
-from subsyncr.qt.widgets import SUBTITLE_FILTER, PathField, enable_row_stripes
+from subsyncr.qt.widgets import (
+    SUBTITLE_FILTER,
+    EngineCombo,
+    PathField,
+    enable_row_stripes,
+)
 
 COLUMN_INCLUDE = 0
 COLUMN_VIDEO = 1
@@ -87,10 +94,6 @@ class BatchMatchDialog(QDialog):
         self._output_suffix = output_suffix
         self._rows: list[_Row] = []
         self._extra_note = ""
-        self._fast_mode_available = (
-            options.engine == EngineId.FFSUBSYNC
-            or EngineId.FFSUBSYNC in options.fallback_chain
-        )
 
         self.video_folder = PathField(caption="Select the video folder", parent=self)
         self.video_folder.set_text(video_folder)
@@ -106,10 +109,16 @@ class BatchMatchDialog(QDialog):
             "audio. This needs no ffmpeg and takes about a tenth of a second "
             "per file."
         )
+        self.engine = EngineCombo(options.engine, self)
+        self.engine.setToolTip(
+            "The engine this batch runs with. The fallback chain from Settings "
+            "still applies to any job it fails."
+        )
         self.fast_mode = QCheckBox(
             "Fast mode - sample the audio instead of reading the whole file", self
         )
         self.subtitle_reference.toggled.connect(self._update_fast_mode_enabled)
+        self.engine.currentIndexChanged.connect(self._update_fast_mode_enabled)
         self.fast_mode.setChecked(fast_mode)
         self.fast_mode.setToolTip(
             "Samples short audio segments when ffsubsync runs, including as a "
@@ -138,6 +147,7 @@ class BatchMatchDialog(QDialog):
         form.addRow("Subtitle folder", self.subtitle_folder)
         form.addRow("", self.recursive)
         form.addRow("", self.subtitle_reference)
+        form.addRow("Engine", self.engine)
         form.addRow("", self.fast_mode)
         form.addRow("Similarity threshold", self.threshold)
         source_box = QGroupBox("Source", self)
@@ -211,12 +221,20 @@ class BatchMatchDialog(QDialog):
         layout.addWidget(self.summary)
         layout.addWidget(buttons)
         self._update_row_actions()
+        # Connected last: the summary reads the table and the OK button.
+        self.engine.currentIndexChanged.connect(self._update_summary)
+
+    def _options_for_engine(self) -> SyncOptions:
+        return self._options.with_engine(self.engine.engine())
 
     @Slot()
     def _update_fast_mode_enabled(self) -> None:
-        self.fast_mode.setEnabled(
-            self._fast_mode_available and not self.subtitle_reference.isChecked()
+        options = self._options_for_engine()
+        available = (
+            options.engine == EngineId.FFSUBSYNC
+            or EngineId.FFSUBSYNC in options.fallback_chain
         )
+        self.fast_mode.setEnabled(available and not self.subtitle_reference.isChecked())
 
     @Slot()
     def _update_row_actions(self) -> None:
@@ -414,8 +432,12 @@ class BatchMatchDialog(QDialog):
         self.table.blockSignals(False)
         self._update_summary()
 
+    @Slot()
     def _update_summary(self) -> None:
-        queued = sum(1 for row in self._rows if row.include and row.subtitle)
+        candidates = self._candidates()
+        queued = sum(1 for job in candidates if first_capable(job) is not None)
+        rerouted = [job for job in candidates if capability_problem(job)]
+        stranded = sum(1 for job in rerouted if first_capable(job) is None)
         unmatched = sum(1 for row in self._rows if row.subtitle is None)
         ambiguous = sum(
             1 for row in self._rows if row.subtitle is not None and row.ambiguous
@@ -425,6 +447,14 @@ class BatchMatchDialog(QDialog):
             parts.append(f"{unmatched} videos unmatched")
         if ambiguous:
             parts.append(f"{ambiguous} need a second look")
+        engine = engines.get(self.engine.engine()).label
+        if stranded:
+            parts.append(f"{stranded} skipped: no engine can sync them")
+        if len(rerouted) > stranded:
+            parts.append(
+                f"{len(rerouted) - stranded} will use a fallback: {engine} "
+                "cannot handle them"
+            )
         self.summary.setText("  -  ".join(parts) + self._extra_note)
         self._ok_button.setEnabled(queued > 0)
         self._update_row_actions()
@@ -432,12 +462,16 @@ class BatchMatchDialog(QDialog):
     # -- result ----------------------------------------------------------
 
     def jobs(self) -> list[SyncJob]:
+        """The pairings to queue, leaving out any that no engine can run."""
+        return [job for job in self._candidates() if first_capable(job) is not None]
+
+    def _candidates(self) -> list[SyncJob]:
         # Fast mode is a per-batch decision, so it is applied here rather than
         # written back into the saved settings.
         fast = self.fast_mode.isEnabled() and self.fast_mode.isChecked()
-        options = self._options
+        # with_engine returns a copy, so the fast-mode tweak below stays local.
+        options = self._options_for_engine()
         if fast:
-            options = options.copy()
             options.ffsubsync.multi_segment_sync = True
         keys: dict[Path, str] = {}
         jobs: list[SyncJob] = []

@@ -217,6 +217,21 @@ def test_copy_is_deep_enough_to_isolate_jobs() -> None:
     assert original.ffsubsync.vad != "auditok"
 
 
+def test_with_engine_runs_it_first_and_keeps_the_rest_of_the_chain() -> None:
+    original = SyncOptions(
+        engine=EngineId.FFSUBSYNC,
+        fallback_chain=(EngineId.ALASS, EngineId.LAPSE),
+    )
+    picked = original.with_engine(EngineId.ALASS)
+    assert picked.engine is EngineId.ALASS
+    # Never retried with the engine that just failed.
+    assert picked.fallback_chain == (EngineId.LAPSE,)
+    picked.files.overwrite_input = True
+    assert original.engine is EngineId.FFSUBSYNC
+    assert original.fallback_chain == (EngineId.ALASS, EngineId.LAPSE)
+    assert original.files.overwrite_input is False
+
+
 def test_identity_ignores_engines_that_are_not_running() -> None:
     """Editing alass settings must not split an ffsubsync group in two."""
     base = SyncOptions()

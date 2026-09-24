@@ -393,6 +393,18 @@ def test_each_video_gets_its_own_process(
     assert len(FakeProcess.instances) == 3
 
 
+def test_different_engines_on_one_reference_run_separately(
+    build_queue: Callable[..., SyncQueue], make_job: Callable[..., SyncJob]
+) -> None:
+    """A per-batch engine pick must not be folded into another batch's group."""
+    first = make_job("Show.S01E01", group_key="episode")
+    second = make_job("Show.S01E01", group_key="episode")
+    second.options = second.options.with_engine(EngineId.ALASS)
+    queue = build_queue()
+    queue.add([first, second])
+    assert queue.pending_groups() == 2
+
+
 def test_shutdown_cancels_running_work(
     build_queue: Callable[..., SyncQueue], make_job: Callable[..., SyncJob]
 ) -> None:
@@ -591,3 +603,23 @@ def test_no_chain_means_a_failure_is_final(
     _drain(queue)
     queue.shutdown()
     assert scripted.engines_used == ["ffsubsync"]
+
+
+def test_skipping_an_unable_engine_says_why(
+    build_queue: Callable[..., SyncQueue],
+    make_job: Callable[..., SyncJob],
+    scripted: type[ScriptedProcess],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The picked engine never ran, so "did not settle it" would be wrong."""
+    scripted.script = {"alass": JobStatus.SUCCEEDED}
+    monkeypatch.setattr(
+        queue_module, "can_run", lambda job, engine: engine is not EngineId.FFSUBSYNC
+    )
+    logs: list[tuple[str, str, str]] = []
+    queue = build_queue(callbacks=QueueCallbacks(log=lambda *a: logs.append(a)))
+    queue.add([_chained(make_job("A"), EngineId.ALASS)])
+    _drain(queue)
+    queue.shutdown()
+    assert scripted.engines_used == ["alass"]
+    assert any("ffsubsync cannot handle these files" in log[2] for log in logs)

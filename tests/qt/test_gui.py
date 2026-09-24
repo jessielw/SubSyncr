@@ -18,12 +18,13 @@ import pytest
 
 from subsyncr.core.config import Theme
 from subsyncr.core.engines import EngineId
-from subsyncr.core.models import JobStatus, SyncJob, SyncResult
+from subsyncr.core.models import JobStatus, SyncJob, SyncOptions, SyncResult
 from subsyncr.core.queue import SyncQueue
 from subsyncr.qt.add_job import AddJobDialog
 from subsyncr.qt.main_window import MainWindow
 from subsyncr.qt.match_view import BatchMatchDialog
 from subsyncr.qt.queue_view import (
+    COLUMN_ENGINE,
     COLUMN_LANGUAGE,
     COLUMN_PROGRESS,
     COLUMN_RESULT,
@@ -511,6 +512,85 @@ def test_fast_mode_only_available_when_ffsubsync_can_run(
     assert single_with_fallback.fast_mode.isEnabled()
 
 
+def test_dialog_engine_pick_reaches_the_jobs(
+    qtbot, media_tree: Callable[..., Path], window: MainWindow
+) -> None:
+    folder = media_tree(["Show.S01E01.mkv", "Show.S01E01.en.srt"])
+    options = window.config.sync.copy()
+    options.engine = EngineId.FFSUBSYNC
+    options.fallback_chain = (EngineId.ALASS,)
+
+    batch = BatchMatchDialog(options, parent=window)
+    qtbot.addWidget(batch)
+    batch.video_folder.set_text(str(folder))
+    batch.scan()
+    batch.engine.set_engine(EngineId.ALASS)
+    job = batch.jobs()[0]
+    assert job.options.engine is EngineId.ALASS
+    assert job.options.fallback_chain == ()
+
+    single = AddJobDialog(options, parent=window)
+    qtbot.addWidget(single)
+    single.reference.set_text(str(folder / "Show.S01E01.mkv"))
+    single.subtitle.set_text(str(folder / "Show.S01E01.en.srt"))
+    single.engine.set_engine(EngineId.LAPSE)
+    assert single.job().options.engine is EngineId.LAPSE
+    # The template the dialogs were built from is untouched.
+    assert options.engine is EngineId.FFSUBSYNC
+
+
+def test_fast_mode_follows_the_dialog_engine(qtbot, window: MainWindow) -> None:
+    options = window.config.sync.copy()
+    options.engine = EngineId.FFSUBSYNC
+    options.fallback_chain = ()
+    for dialog in (
+        AddJobDialog(options, parent=window),
+        BatchMatchDialog(options, parent=window),
+    ):
+        qtbot.addWidget(dialog)
+        assert dialog.fast_mode.isEnabled()
+        dialog.engine.set_engine(EngineId.ALASS)
+        assert not dialog.fast_mode.isEnabled()
+        dialog.engine.set_engine(EngineId.FFSUBSYNC)
+        assert dialog.fast_mode.isEnabled()
+
+
+def test_accepted_engine_pick_becomes_the_default(
+    qtbot, window: MainWindow, make_job: Callable[..., SyncJob], monkeypatch
+) -> None:
+    window.config.sync.engine = EngineId.FFSUBSYNC
+    pair = make_job("Show.S01E01")
+    dialog = window._build_add_job_dialog(
+        reference=pair.reference_path, subtitle=pair.subtitle_path
+    )
+    qtbot.addWidget(dialog)
+    dialog.engine.set_engine(EngineId.ALASS)
+    monkeypatch.setattr(dialog, "exec", lambda: AddJobDialog.DialogCode.Accepted)
+    monkeypatch.setattr(window, "_queue_jobs", lambda jobs, verb: None)
+    window._run_add_job_dialog(dialog)
+    assert window.config.sync.engine is EngineId.ALASS
+
+    follow_up = window._build_add_job_dialog()
+    qtbot.addWidget(follow_up)
+    assert follow_up.engine.engine() is EngineId.ALASS
+
+
+def test_engine_column_shows_the_engine_that_ran(
+    window: MainWindow, make_job: Callable[..., SyncJob]
+) -> None:
+    job = make_job("Show.S01E01")
+    job.options.engine = EngineId.FFSUBSYNC
+    window.queue.add([job])
+    model = window.model
+    assert model.data(model.index(0, COLUMN_ENGINE)) == "ffsubsync"
+
+    job.status = JobStatus.SUCCEEDED
+    job.result = SyncResult(status=JobStatus.SUCCEEDED, engine=EngineId.ALASS)
+    assert model.data(model.index(0, COLUMN_ENGINE)) == "alass"
+    tip = model.data(model.index(0, COLUMN_ENGINE), Qt.ItemDataRole.ToolTipRole)
+    assert "ffsubsync" in str(tip)
+
+
 def test_match_actions_wait_for_pairings(
     qtbot, media_tree: Callable[..., Path], window: MainWindow
 ) -> None:
@@ -655,3 +735,65 @@ def test_settings_keeps_fast_mode_it_does_not_edit(qtbot, window: MainWindow) ->
     dialog = SettingsDialog(window.config, parent=window)
     qtbot.addWidget(dialog)
     assert dialog.config().fast_mode is True
+
+
+def _subtitle_reference_options(window: MainWindow, *chain: EngineId) -> SyncOptions:
+    options = window.config.sync.copy()
+    options.engine = EngineId.FFSUBSYNC
+    options.fallback_chain = chain
+    return options
+
+
+def test_add_job_blocks_a_pair_no_engine_can_sync(
+    qtbot, media_tree: Callable[..., Path], window: MainWindow
+) -> None:
+    folder = media_tree(["Show.S01E01.srt", "Show.S01E01.en.srt"])
+    dialog = AddJobDialog(_subtitle_reference_options(window), parent=window)
+    qtbot.addWidget(dialog)
+    dialog.reference.set_text(str(folder / "Show.S01E01.srt"))
+    dialog.subtitle.set_text(str(folder / "Show.S01E01.en.srt"))
+    assert dialog._ok.isEnabled()
+
+    dialog.engine.set_engine(EngineId.AUTOSUBSYNC)
+    assert not dialog._ok.isEnabled()
+    assert "no fallback engine can either" in dialog.hint.text()
+
+
+def test_add_job_warns_but_allows_a_fallback(
+    qtbot, media_tree: Callable[..., Path], window: MainWindow
+) -> None:
+    folder = media_tree(["Show.S01E01.srt", "Show.S01E01.en.srt"])
+    options = _subtitle_reference_options(window, EngineId.ALASS)
+    dialog = AddJobDialog(options, parent=window)
+    qtbot.addWidget(dialog)
+    dialog.reference.set_text(str(folder / "Show.S01E01.srt"))
+    dialog.subtitle.set_text(str(folder / "Show.S01E01.en.srt"))
+    dialog.engine.set_engine(EngineId.AUTOSUBSYNC)
+    assert dialog._ok.isEnabled()
+    assert "alass will run instead" in dialog.hint.text()
+
+
+def test_match_summary_flags_pairings_the_engine_cannot_run(
+    qtbot, media_tree: Callable[..., Path], window: MainWindow
+) -> None:
+    folder = media_tree(["Show.S01E01.srt", "Show.S01E01.en.srt"])
+    dialog = BatchMatchDialog(_subtitle_reference_options(window), parent=window)
+    qtbot.addWidget(dialog)
+    dialog.load_files([folder / "Show.S01E01.srt"], [folder / "Show.S01E01.en.srt"])
+    assert len(dialog.jobs()) == 1
+
+    dialog.engine.set_engine(EngineId.AUTOSUBSYNC)
+    assert dialog.jobs() == []
+    assert "1 skipped" in dialog.summary.text()
+    assert not dialog._ok_button.isEnabled()
+
+    with_fallback = BatchMatchDialog(
+        _subtitle_reference_options(window, EngineId.ALASS), parent=window
+    )
+    qtbot.addWidget(with_fallback)
+    with_fallback.load_files(
+        [folder / "Show.S01E01.srt"], [folder / "Show.S01E01.en.srt"]
+    )
+    with_fallback.engine.set_engine(EngineId.AUTOSUBSYNC)
+    assert len(with_fallback.jobs()) == 1
+    assert "1 will use a fallback" in with_fallback.summary.text()

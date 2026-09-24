@@ -416,6 +416,8 @@ class SyncQueue:
         pending = list(runnable)
         options = runnable[0].options
         previous = options.engine
+        # Whether ``previous`` actually ran, or was skipped as unable.
+        previous_ran = False
         for position, engine in enumerate((options.engine, *options.fallback_chain)):
             if not pending:
                 break
@@ -423,7 +425,7 @@ class SyncQueue:
             if not capable:
                 continue
             if position:
-                self._announce_fallback(capable, previous, engine)
+                self._announce_fallback(capable, previous, engine, ran=previous_ran)
             produced = self._attempt(capable, engine, runnable)
             results.update(produced)
             attempted = {job.id for job in capable}
@@ -436,18 +438,19 @@ class SyncQueue:
                 in (JobStatus.FAILED, JobStatus.SKIPPED_LOW_QUALITY)
             ]
             previous = engine
+            previous_ran = True
         return results
 
     def _announce_fallback(
-        self, jobs: list[SyncJob], previous: EngineId, engine: EngineId
+        self, jobs: list[SyncJob], previous: EngineId, engine: EngineId, *, ran: bool
     ) -> None:
+        message = (
+            f"{previous} did not settle it; retrying with {engine}"
+            if ran
+            else f"{previous} cannot handle these files; using {engine}"
+        )
         for job in jobs:
-            self._emit_log(
-                job.id,
-                "INFO",
-                f"{previous} did not settle it; retrying with {engine}",
-                jobs,
-            )
+            self._emit_log(job.id, "INFO", message, jobs)
 
     def _attempt(
         self, runnable: list[SyncJob], engine: EngineId, group: list[SyncJob]

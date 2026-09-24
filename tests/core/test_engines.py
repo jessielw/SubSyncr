@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 
 from subsyncr.core import engines
+from subsyncr.core.engine import EngineError, first_capable, routing_notice, validate
 from subsyncr.core.engines import EngineId, EngineKind, Reported
+from subsyncr.core.models import SyncJob, SyncOptions
 
 
 def test_every_registered_engine_is_keyed_by_its_own_id() -> None:
@@ -138,3 +140,40 @@ def test_autosubsync_reads_subrip_and_nothing_else() -> None:
     spec = engines.get(EngineId.AUTOSUBSYNC)
     assert spec.input_suffixes == frozenset({".srt"})
     assert not spec.accepts_subtitle(".ass")
+
+
+def _subtitle_pair(tmp_path: Path, engine: EngineId, *chain: EngineId) -> SyncJob:
+    """A subtitle reference, which autosubsync alone cannot use."""
+    reference = tmp_path / "reference.srt"
+    subtitle = tmp_path / "subtitle.srt"
+    for path in (reference, subtitle):
+        path.write_text("1\n00:00:01,000 --> 00:00:02,000\nhi\n", encoding="utf-8")
+    return SyncJob(
+        reference_path=reference,
+        subtitle_path=subtitle,
+        output_path=tmp_path / "out.srt",
+        options=SyncOptions(engine=engine, fallback_chain=chain),
+    )
+
+
+def test_an_unable_engine_is_fine_while_a_fallback_can_step_in(
+    tmp_path: Path,
+) -> None:
+    job = _subtitle_pair(tmp_path, EngineId.AUTOSUBSYNC, EngineId.ALASS)
+    assert first_capable(job) is EngineId.ALASS
+    assert "alass will run instead" in routing_notice(job)
+    validate(job)
+
+
+def test_an_unable_engine_with_no_fallback_is_rejected(tmp_path: Path) -> None:
+    job = _subtitle_pair(tmp_path, EngineId.AUTOSUBSYNC)
+    assert first_capable(job) is None
+    assert "no fallback engine can either" in routing_notice(job)
+    with pytest.raises(EngineError, match="autosubsync cannot use"):
+        validate(job)
+
+
+def test_a_capable_engine_needs_no_notice(tmp_path: Path) -> None:
+    job = _subtitle_pair(tmp_path, EngineId.ALASS)
+    assert first_capable(job) is EngineId.ALASS
+    assert routing_notice(job) == ""

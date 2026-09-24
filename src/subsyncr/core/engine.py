@@ -85,6 +85,30 @@ def can_run(job: SyncJob, engine: EngineId) -> bool:
     return not capability_problem(job, engine)
 
 
+def first_capable(job: SyncJob) -> EngineId | None:
+    """The engine that will actually run first: the chosen one, else a fallback.
+
+    None means nothing in the chain can handle these files.
+    """
+    chain = (job.options.engine, *job.options.fallback_chain)
+    return next((engine for engine in chain if can_run(job, engine)), None)
+
+
+def routing_notice(job: SyncJob) -> str:
+    """What a frontend should say before queueing, or "" if the chosen engine runs.
+
+    Pair it with ``first_capable``: None there means this is a hard stop, not
+    just a heads-up.
+    """
+    problem = capability_problem(job)
+    if not problem:
+        return ""
+    engine = first_capable(job)
+    if engine is None:
+        return f"{problem}, and no fallback engine can either."
+    return f"{problem}; {engines.get(engine).label} will run instead."
+
+
 def validate(job: SyncJob) -> None:
     """Reject jobs that cannot possibly succeed, before spending a process."""
     if not job.reference_path.is_file():
@@ -97,9 +121,11 @@ def validate(job: SyncJob) -> None:
         and not job.options.files.replace_output
     ):
         raise EngineError(f"Output already exists: {job.output_path}")
-    if problem := capability_problem(job):
-        raise EngineError(problem)
-    spec = engines.get(job.options.engine)
+    # The chosen engine being unable is not fatal while a fallback can step in.
+    engine = first_capable(job)
+    if engine is None:
+        raise EngineError(capability_problem(job))
+    spec = engines.get(engine)
     if spec.needs_ffmpeg and needs_ffmpeg(job.reference_path):
         status = probe(job.options.environment.ffmpeg_path)
         if not status.ready:

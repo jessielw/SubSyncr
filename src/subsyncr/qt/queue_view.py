@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from subsyncr.core import engines
+from subsyncr.core.engines import EngineId
 from subsyncr.core.models import JobStatus, SyncJob
 from subsyncr.core.queue import SyncQueue
 from subsyncr.qt.icons import STATUS_ICONS
@@ -54,8 +56,16 @@ COLUMN_STATUS = 1
 COLUMN_REFERENCE = 2
 COLUMN_SUBTITLE = 3
 COLUMN_LANGUAGE = 4
-COLUMN_PROGRESS = 5
-COLUMN_RESULT = 6
+COLUMN_ENGINE = 5
+COLUMN_PROGRESS = 6
+COLUMN_RESULT = 7
+
+
+def _engine_for(job: SyncJob) -> EngineId:
+    """The engine that produced the result, else the one the job will start with."""
+    if job.result is not None and job.result.engine is not None:
+        return job.result.engine
+    return job.options.engine
 
 
 class JobTableModel(QAbstractTableModel):
@@ -67,6 +77,7 @@ class JobTableModel(QAbstractTableModel):
         "Reference",
         "Subtitle",
         "Language",
+        "Engine",
         "Progress",
         "Result",
     )
@@ -192,6 +203,8 @@ class JobTableModel(QAbstractTableModel):
                 return job.subtitle_path.name
             case _ if column == COLUMN_LANGUAGE:
                 return job.language or ""
+            case _ if column == COLUMN_ENGINE:
+                return engines.get(_engine_for(job)).label
             case _ if column == COLUMN_PROGRESS:
                 if job.status is JobStatus.RUNNING:
                     if job.progress is None:
@@ -213,6 +226,12 @@ class JobTableModel(QAbstractTableModel):
                 return str(job.reference_path)
             case _ if column == COLUMN_SUBTITLE:
                 return str(job.subtitle_path)
+            case _ if column == COLUMN_ENGINE:
+                ran = _engine_for(job)
+                if ran is not job.options.engine:
+                    configured = engines.get(job.options.engine).label
+                    return f"fell back from {configured}"
+                return ""
             case _ if column == COLUMN_RESULT:
                 parts: list[str] = []
                 if job.last_error:
@@ -345,6 +364,7 @@ class JobTableView(QTableView):
             COLUMN_RUN,
             COLUMN_STATUS,
             COLUMN_LANGUAGE,
+            COLUMN_ENGINE,
             COLUMN_PROGRESS,
         ):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)

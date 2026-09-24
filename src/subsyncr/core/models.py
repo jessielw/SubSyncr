@@ -483,6 +483,19 @@ class SyncOptions:
             autosubsync=replace(self.autosubsync),
         )
 
+    def with_engine(self, engine: EngineId) -> Self:
+        """A copy that runs ``engine`` first, keeping the rest of the chain.
+
+        The engine is dropped from the chain so a failure does not simply run
+        the same engine again.
+        """
+        options = self.copy()
+        options.engine = engine
+        options.fallback_chain = tuple(
+            item for item in self.fallback_chain if item is not engine
+        )
+        return options
+
     def identity(self) -> dict[str, Any]:
         """The subset that decides whether two jobs can share a worker process.
 

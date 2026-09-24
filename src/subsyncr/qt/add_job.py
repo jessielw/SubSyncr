@@ -16,16 +16,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from subsyncr.core.engine import first_capable, routing_notice
 from subsyncr.core.engines import EngineId
 from subsyncr.core.language import parse_subtitle_tags
 from subsyncr.core.models import SyncJob, SyncOptions, default_output_for
 from subsyncr.core.planner import build_job
 from subsyncr.core.scanner import SUBTITLE_REFERENCE_EXTENSIONS
 from subsyncr.qt.sizing import SIZE_ADD_JOB, SPACING
-from subsyncr.qt.widgets import MEDIA_FILTER, SUBTITLE_FILTER, PathField
+from subsyncr.qt.widgets import MEDIA_FILTER, SUBTITLE_FILTER, EngineCombo, PathField
 
 # The .sub format is read but never written back: resolve_output redirects it,
-# whichever engine runs. Named so _validate can tell it from a real problem.
+# whichever engine runs.
 _SUB_FORMAT_NOTE = "The .sub format cannot be written; the output will be .srt."
 
 
@@ -44,10 +45,13 @@ class AddJobDialog(QDialog):
         self._options = options
         self._output_suffix = output_suffix
         self._output_edited = False
-        self._fast_mode_available = (
-            options.engine == EngineId.FFSUBSYNC
-            or EngineId.FFSUBSYNC in options.fallback_chain
+
+        self.engine = EngineCombo(options.engine, self)
+        self.engine.setToolTip(
+            "The engine this job runs with. The fallback chain from Settings "
+            "still applies if it fails."
         )
+        self.engine.currentIndexChanged.connect(self._validate)
 
         self.reference = PathField(
             file_filter=MEDIA_FILTER,
@@ -93,6 +97,7 @@ class AddJobDialog(QDialog):
         form = QFormLayout()
         form.addRow("Reference", self.reference)
         form.addRow("Subtitle", self.subtitle)
+        form.addRow("Engine", self.engine)
         form.addRow("Output", self.output)
         form.addRow("", self.overwrite)
         form.addRow("", self.backup)
@@ -127,18 +132,30 @@ class AddJobDialog(QDialog):
         self.output.setEnabled(not checked)
         self._validate()
 
+    def _options_for_engine(self) -> SyncOptions:
+        return self._options.with_engine(self.engine.engine())
+
+    def _fast_mode_available(self) -> bool:
+        options = self._options_for_engine()
+        return (
+            options.engine == EngineId.FFSUBSYNC
+            or EngineId.FFSUBSYNC in options.fallback_chain
+        )
+
     @Slot()
     def _validate(self) -> None:
         reference = Path(self.reference.text()) if self.reference.text() else None
         subtitle = Path(self.subtitle.text()) if self.subtitle.text() else None
         self.fast_mode.setEnabled(
-            self._fast_mode_available
+            self._fast_mode_available()
             and (
                 reference is None
                 or reference.suffix.lower() not in SUBTITLE_REFERENCE_EXTENSIONS
             )
         )
         problems: list[str] = []
+        # Advice, not obstacles: the job still runs.
+        notes: list[str] = []
         if reference is None or not reference.is_file():
             problems.append("Choose an existing reference file.")
         if subtitle is None or not subtitle.is_file():
@@ -146,11 +163,22 @@ class AddJobDialog(QDialog):
         if not self.overwrite.isChecked() and not self.output.text().strip():
             problems.append("Choose an output path.")
         if subtitle is not None and subtitle.suffix.casefold() == ".sub":
-            # Advice, not an obstacle: the job still runs, it just lands as .srt.
-            problems.append(_SUB_FORMAT_NOTE)
-        self.hint.setText(" ".join(problems))
-        blocking = [p for p in problems if p != _SUB_FORMAT_NOTE]
-        self._ok.setEnabled(not blocking)
+            # It just lands as .srt.
+            notes.append(_SUB_FORMAT_NOTE)
+        if reference is not None and subtitle is not None:
+            # Only the file types matter here, so no output or group is worked
+            # out - both touch the disk, and the path may still be half-typed.
+            probe = SyncJob(
+                reference_path=reference,
+                subtitle_path=subtitle,
+                output_path=subtitle,
+                options=self._options_for_engine(),
+            )
+            if notice := routing_notice(probe):
+                target = problems if first_capable(probe) is None else notes
+                target.append(notice)
+        self.hint.setText(" ".join(problems + notes))
+        self._ok.setEnabled(not problems)
 
     def job(self) -> SyncJob:
         reference = Path(self.reference.text())
@@ -158,7 +186,7 @@ class AddJobDialog(QDialog):
         job = build_job(
             reference,
             subtitle,
-            self._options,
+            self._options_for_engine(),
             output_suffix=self._output_suffix,
             language=parse_subtitle_tags(subtitle).label or None,
         )
