@@ -60,13 +60,16 @@ def test_unrelated_flags_are_kept() -> None:
 
 @windows_only
 @pytest.mark.parametrize(
+    # By name, not value: parametrize runs at import, before skipif can act,
+    # and neither constant exists in subprocess off Windows.
     "chosen",
-    [subprocess.CREATE_NEW_CONSOLE, subprocess.DETACHED_PROCESS],
+    ["CREATE_NEW_CONSOLE", "DETACHED_PROCESS"],
     ids=["new-console", "detached"],
 )
-def test_a_caller_that_chose_a_console_is_not_overruled(chosen: int) -> None:
+def test_a_caller_that_chose_a_console_is_not_overruled(chosen: str) -> None:
     """Both are incompatible with CREATE_NO_WINDOW; adding it would raise."""
-    assert spawn.hide_window(chosen) == chosen
+    flag = getattr(subprocess, chosen)
+    assert spawn.hide_window(flag) == flag
 
 
 @windows_only
