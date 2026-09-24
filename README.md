@@ -1,7 +1,11 @@
 # SubSyncr
 
-A desktop batch queue for [ffsubsync](https://github.com/smacke/ffsubsync), built
-for the job it is actually good at: taking a folder of video files and a folder of
+A desktop batch queue for subtitle synchronization, driving four engines -
+[ffsubsync](https://github.com/smacke/ffsubsync),
+[alass](https://github.com/kaegi/alass),
+[lapse](https://github.com/Schwponaco-org/lapse) and
+[autosubsync](https://github.com/oseiskar/autosubsync) - and built for the job
+they are actually good at: taking a folder of video files and a folder of
 loosely-named subtitle files, working out which belongs to which, letting you check
 that before anything runs, and then syncing the lot.
 
@@ -9,6 +13,23 @@ Bazarr already handles subtitle sync for a Sonarr/Radarr-managed library, and do
 it well. It cannot help before a library exists - with a pile of loose files whose
 names do not line up and no episode records behind them. That gap is what this
 fills, so the interesting part here is the **matching and review**, not the syncing.
+
+## Install
+
+1. Download the archive for your OS from
+   [GitHub Releases](https://github.com/jessielw/SubSyncr/releases):
+   Windows x64, Linux x64, macOS Apple Silicon (arm64) or macOS Intel (x64).
+2. Unpack it anywhere and run `SubSyncr` (`SubSyncr.exe` on Windows,
+   `SubSyncr.app` on macOS). Nothing is installed system-wide.
+3. For an audio reference you also need `ffmpeg` and `ffprobe`, which are not
+   bundled. Get them from [ffmpeg.org](https://ffmpeg.org/download.html) (or
+   `brew install ffmpeg` on macOS), then either put them on `PATH` or point
+   Settings at their folder. Syncing against a subtitle file needs neither.
+
+**macOS:** the app is not signed or notarized, so Gatekeeper blocks the first
+launch. Right-click `SubSyncr.app` and choose **Open**; on macOS 15 and later,
+try to open it once, then allow it under System Settings → Privacy & Security →
+**Open Anyway**.
 
 ## What it does
 
@@ -20,6 +41,17 @@ fills, so the interesting part here is the **matching and review**, not the sync
   single audio extraction.
 - **A real queue.** Parallel by default, per-job cancellation, retry,
   crash-recoverable pending work, and searchable history with offsets and scores.
+- **Four engines with a fallback chain.** Pick ffsubsync, alass, lapse or
+  autosubsync per job, and set in Settings which engines to retry with, in
+  order, when one fails or returns a low-quality verdict. alass and lapse are
+  standalone binaries, downloaded on first use and verified against a pinned
+  SHA-256 before they ever run.
+- **Embedded references.** Use a text subtitle track already inside the video
+  as the reference instead of its audio - comparing two lists of timestamps
+  rather than decoding the film - or a PGS (Blu-ray image) track's display
+  timings with ffsubsync, picked by language when set to Auto. When the files
+  you drop need an engine other than the chosen one, the job says so and a
+  capable engine from the chain runs instead.
 - **The full ffsubsync option surface** - VAD backend, piecewise `--split-penalty`
   alignment, segment sampling, reference stream selection, and the quality gate.
 - **Speech reuse between sessions**, so a language added later skips extraction.
@@ -34,15 +66,27 @@ fills, so the interesting part here is the **matching and review**, not the sync
   scheme was on launch.
 - **A backup before any in-place overwrite**, and an existing `.bak` is never
   replaced, so re-running cannot bury the true original.
+- **A log file** with its level and retention set in Settings, and an
+  **Open log folder** button there and on error dialogs. Sync workers forward
+  their log records to the main process, so one file covers the whole run.
 - **A headless CLI** over the same core, for scripted batches.
 
-## Requirements
+## Platform notes
 
-- Python 3.12 or 3.13, and [uv](https://docs.astral.sh/uv/)
-- `ffmpeg` and `ffprobe` on `PATH`, or their folder set in Settings.
-  Neither is needed when the reference is itself a subtitle file.
+- alass publishes no macOS build, so SubSyncr cannot download it there; the app
+  says so and suggests `brew install alass`. lapse covers Windows, Linux and
+  macOS on both x64 and arm64.
+- PGS references come from a
+  [fork of ffsubsync](https://github.com/jessielw/ffsubsync) carrying a fix that
+  is pending upstream
+  ([smacke/ffsubsync#237](https://github.com/smacke/ffsubsync/pull/237)). The
+  pin goes away once a release includes it; until then SubSyncr ships as
+  release downloads only, not on PyPI.
 
-## Run
+## Run from source
+
+Needs Python 3.12 or 3.13 and [uv](https://docs.astral.sh/uv/), plus
+`ffmpeg`/`ffprobe` as above.
 
 ```powershell
 uv sync --group dev
@@ -57,7 +101,7 @@ uv run subsyncr match  D:\media\Season01              # propose pairings only
 uv run subsyncr match  D:\media\Season01 --json
 uv run subsyncr batch  D:\media\Season01 --auto-match 90 --workers 2
 uv run subsyncr batch  D:\movies --fast                  # sample, do not read in full
-uv run subsyncr batch  D:\good-subs D:ad-subs --subs-as-reference
+uv run subsyncr batch  D:\good-subs D:\bad-subs --subs-as-reference
 uv run subsyncr sync   episode.mkv episode.en.srt
 uv run subsyncr history --limit 20
 ```
@@ -79,11 +123,15 @@ honest: anything it cannot reach is logic that leaked into the GUI.
 
 ### Why syncs run in their own process
 
-`ffsubsync` calls `logging.basicConfig()` at import and reconfigures the root
-logger, and offers no cancellation hook. A subprocess fixes both, makes the
-alignment score - which ffsubsync only logs and never returns - cleanly
-recoverable, and returns every byte the sync allocated the moment it exits
-(measured: ~104 MB peak, 0 MB after).
+Every engine runs in a worker process, whether it is a Python library loaded
+inside the worker (ffsubsync, autosubsync) or an external binary the worker
+launches (alass, lapse). The reason started with ffsubsync: it calls
+`logging.basicConfig()` at import and reconfigures the root logger, and offers no
+cancellation hook. A subprocess fixes both, makes the alignment score - which
+ffsubsync only logs and never returns - cleanly recoverable, and returns every
+byte the sync allocated the moment it exits (measured: ~104 MB peak, 0 MB after).
+The same process boundary gives every engine one way to be cancelled and one
+way to report.
 
 The child speaks newline-delimited JSON on stdout and takes exclusive ownership of
 that descriptor, so nothing a dependency prints can corrupt the channel.
@@ -193,4 +241,7 @@ artwork, regenerate the `.ico` PyInstaller needs at build time with
 ## Where things are stored
 
 `subsyncr doctor` prints the exact paths. Config is JSON, the queue and history
-are SQLite, and cached speech arrays live under the platform cache directory.
+are SQLite, and cached speech arrays and downloaded engine binaries live under
+the platform cache directory. The log file sits in the platform log directory
+(on Windows, `%LOCALAPPDATA%\SubSyncr\SubSyncr\Logs\subsyncr.log`) and
+rotates at midnight. Set `SUBSYNCR_DATA_DIR` to move all of it.
