@@ -71,3 +71,31 @@ def test_unknown_package_without_notice_still_fails(notice_build, monkeypatch):
     )
     with pytest.raises(ValueError, match="No license file collected for unknown"):
         support.collect_notices(root, ["unknown"])
+
+
+@pytest.mark.parametrize(
+    ("version", "numbers"),
+    [
+        ("0.1.0", (0, 1, 0)),
+        ("0.1.0-dev.1", (0, 1, 0)),
+        ("1.2.3rc1", (1, 2, 3)),
+        ("10.20.30.post2", (10, 20, 30)),
+    ],
+)
+def test_prerelease_versions_get_numeric_release(monkeypatch, version, numbers):
+    project = Path(__file__).resolve().parents[1]
+    monkeypatch.syspath_prepend(str(project / "packaging"))
+    support = importlib.import_module("release_support")
+    assert support.numeric_version(version) == numbers
+
+
+def test_windows_resource_keeps_prerelease_label(tmp_path, monkeypatch):
+    project = Path(__file__).resolve().parents[1]
+    monkeypatch.syspath_prepend(str(project / "packaging"))
+    support = importlib.import_module("release_support")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nversion = "0.1.0-dev.1"\n', encoding="utf-8"
+    )
+    resource = support.windows_version(tmp_path, "0.1.0-dev.1").read_text()
+    assert "filevers=(0, 1, 0, 0)" in resource
+    assert "StringStruct('ProductVersion', '0.1.0-dev.1')" in resource

@@ -5,6 +5,7 @@ from __future__ import annotations
 from importlib.metadata import distribution, packages_distributions
 import json
 from pathlib import Path
+import re
 import tempfile
 import tomllib
 
@@ -95,12 +96,25 @@ def collect_notices(root: Path, modules: list[str]) -> list[tuple[str, str, str]
     return entries
 
 
+def numeric_version(version: str) -> tuple[int, int, int]:
+    """The X.Y.Z release a version string starts with, e.g. 0.1.0-dev.1 -> 0.1.0.
+
+    Windows version resources and macOS bundle versions only accept integers,
+    so pre-release suffixes are dropped there and kept in the display strings.
+    """
+    match = re.match(r"(\d+)\.(\d+)\.(\d+)", version)
+    if match is None:
+        raise ValueError(f"Version must start with X.Y.Z: {version}")
+    major, minor, patch = (int(part) for part in match.groups())
+    return major, minor, patch
+
+
 def windows_version(root: Path, version: str) -> Path:
     """Generate Explorer's version resource from the checked runtime version."""
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     if project["project"]["version"] != version:
         raise ValueError("Package and runtime versions disagree")
-    numbers = (*(int(part) for part in version.split(".")), 0)
+    numbers = (*numeric_version(version), 0)
     resource = root / "build" / "windows-version.txt"
     resource.parent.mkdir(parents=True, exist_ok=True)
     resource.write_text(

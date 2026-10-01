@@ -13,7 +13,11 @@ root = Path(SPECPATH).parent
 # than keep a second copy of the list that silently rots.
 sys.path.insert(0, str(root / "src"))
 sys.path.insert(0, str(root / "packaging"))
-from release_support import collect_notices, windows_version  # noqa: E402
+from release_support import (  # noqa: E402
+    collect_notices,
+    numeric_version,
+    windows_version,
+)
 from subsyncr import __version__  # noqa: E402
 from subsyncr.core.engines import all_specs  # noqa: E402
 
@@ -108,15 +112,16 @@ coll = COLLECT(
 # bundle is ad-hoc signed, without Developer ID signing or notarization.
 # Gatekeeper still requires the user to allow it; the README says how.
 if sys.platform == "darwin":
+    bundle_version = ".".join(str(part) for part in numeric_version(__version__))
     app = BUNDLE(
         coll,
         name="SubSyncr.app",
         icon=str(icon),
         bundle_identifier="io.github.jessielw.subsyncr",
-        version=__version__,
+        version=bundle_version,
         info_plist={
             "CFBundleDisplayName": "SubSyncr",
-            "CFBundleShortVersionString": __version__,
+            "CFBundleShortVersionString": bundle_version,
             "NSHighResolutionCapable": True,
             # Follow the system's light/dark setting rather than forcing light.
             "NSRequiresAquaSystemAppearance": False,

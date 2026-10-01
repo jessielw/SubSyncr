@@ -1,13 +1,16 @@
 name: Release
 
-# A v* tag builds every platform and opens a *draft* release with the archives
-# attached, so nothing is public until it has been looked at. A manual run
+# A version tag (0.1.0, v0.1.0, 0.1.0-dev.1, ...) builds every platform and
+# opens a *draft* release with the archives attached, so nothing is public
+# until it has been looked at. Tags with a pre-release suffix are drafted as
+# pre-releases. A manual run
 # builds the same archives as workflow artifacts and publishes nothing, which
 # is how to dry-run this file.
 on:
   push:
     tags:
-      - "v*"
+      - "[0-9]*"
+      - "v[0-9]*"
   workflow_dispatch:
 
 permissions:
@@ -80,7 +83,7 @@ jobs:
           version=$(uv run --no-sync python -c "import subsyncr; print(subsyncr.__version__)")
           # A tag that disagrees with the code would ship an About box and
           # log header claiming a different release than the download.
-          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "${GITHUB_REF_NAME#v}" != "$version" ]]; then
             echo "::error::tag $GITHUB_REF_NAME does not match __version__ $version"
             exit 1
           fi
@@ -147,6 +150,17 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # Anything after X.Y.Z (-dev.1, rc1, ...) marks a pre-release.
+      - name: Detect pre-release
+        id: kind
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_NAME#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Generate checksums
         shell: bash
         run: |
@@ -157,6 +171,7 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
         with:
           draft: true
+          prerelease: ${{ steps.kind.outputs.prerelease }}
           name: SubSyncr ${{ github.ref_name }}
           generate_release_notes: true
           files: artifacts/*

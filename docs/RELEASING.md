@@ -40,7 +40,10 @@ local source tests and a successful build do not substitute for them.
 1. Review `git status` and the intended public history. Local handoff files,
    assistant state, environments, credentials, and media files must stay excluded.
    Inspect the public author/contact metadata. Never push local `backup-*` tags
-   as part of the release; push only the specific `v<version>` tag.
+   as part of the release; push only the one release tag:
+   `<version>` or `v<version>`, exactly matching `__version__` (for example
+   `0.1.0`, `v0.1.0`, or `0.1.0-dev.1`). Pre-release suffixes become GitHub
+   pre-releases.
 2. After checks pass and publication is authorized, create and push that tag.
    The workflow assembles a **draft** release with the platform archives and a
    `SHA256SUMS.txt` manifest. Check the version displayed by each app.
