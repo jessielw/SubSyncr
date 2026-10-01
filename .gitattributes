@@ -1,0 +1,2 @@
+# License notices are hashed byte-for-byte; never convert their line endings.
+packaging/licenses/** -text
