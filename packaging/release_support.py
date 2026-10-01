@@ -47,6 +47,8 @@ def collect_notices(root: Path, modules: list[str]) -> list[tuple[str, str, str]
                 files.append(str(destination).replace("\\", "/"))
         supplemental = {
             "faust-cchardet": ["faust-cchardet-COPYING.txt"],
+            # The generic wheel used on Linux/macOS ARM omits its own license.
+            "pysoundfile": ["PySoundFile-LICENSE.txt"],
             "pyside6-essentials": [
                 "LGPL-3.0-only.txt",
                 "GPL-3.0-only.txt",

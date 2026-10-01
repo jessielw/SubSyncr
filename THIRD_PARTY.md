@@ -47,9 +47,12 @@ Upstream locations and hashes of supplemental documents are recorded in
 filenames. The original SubSyncr application mark is covered by the project license.
 
 The faust-cchardet wheel omits its license file; its upstream `COPYING` is
-included separately as `licenses/faust-cchardet-COPYING.txt`. Other collected
-Python distributions supply their own notices in the inventory. Builds fail
-if a collected distribution has neither a packaged nor supplemental notice.
+included separately as `licenses/faust-cchardet-COPYING.txt`. PySoundFile's generic
+wheel also omits its license; `licenses/PySoundFile-LICENSE.txt` is copied verbatim
+from the exact source archive pinned in `uv.lock`. Its source URL, archive checksum,
+and notice checksum are recorded in `packaging/licenses/sources.json`. Other
+collected Python distributions supply their own notices in the inventory. Builds
+fail if a collected distribution has neither a packaged nor supplemental notice.
 
 ## Synchronization engines
 

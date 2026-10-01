@@ -51,5 +51,11 @@
   "faust-cchardet-COPYING.txt": {
     "source": "https://raw.githubusercontent.com/faust-streaming/cChardet/master/COPYING",
     "sha256": "107a29ccdd2d778aa2df5462f85dddfa099059abd22e064e07ec2cc9bafc37cd"
+  },
+  "PySoundFile-LICENSE.txt": {
+    "source": "https://files.pythonhosted.org/packages/07/fa/bbe4d1c4328eaa83c0656c729eabbf811377fc1e8416d42bf7f7af63ef8c/PySoundFile-0.9.0.post1.tar.gz",
+    "note": "Verbatim PySoundFile-0.9.0.post1/LICENSE from the locked source archive; the generic wheel omits this notice.",
+    "archive_sha256": "43dd46a2afc0484c26930a7e59eef9365cee81bce7a4aadc5699f788f60d32c3",
+    "sha256": "b09431af469da8a987ec2f059f478b0429eac627716e13248d5880a869ff22f2"
   }
 }
