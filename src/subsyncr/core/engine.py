@@ -23,6 +23,7 @@ from subsyncr.core import engines, logger, subtitles
 from subsyncr.core.engines import EngineId
 from subsyncr.core.ffmpeg import probe
 from subsyncr.core.models import JobStatus, SyncJob, SyncResult
+from subsyncr.core.output import same_path
 from subsyncr.core.scanner import SUBTITLE_REFERENCE_EXTENSIONS, needs_ffmpeg
 from subsyncr.core.spawn import creation_flags
 
@@ -121,6 +122,12 @@ def validate(job: SyncJob) -> None:
         and not job.options.files.replace_output
     ):
         raise EngineError(f"Output already exists: {job.output_path}")
+    if same_path(job.effective_output, job.reference_path):
+        raise EngineError("Output would overwrite the reference file")
+    if not job.options.files.overwrite_input and same_path(
+        job.effective_output, job.subtitle_path
+    ):
+        raise EngineError("Output is the input subtitle; choose Overwrite explicitly")
     # The chosen engine being unable is not fatal while a fallback can step in.
     engine = first_capable(job)
     if engine is None:
@@ -137,6 +144,7 @@ def build_spec(
     *,
     reference_override: Path | None = None,
     serialize_speech: bool = False,
+    speech_output: Path | None = None,
     engine: EngineId | None = None,
 ) -> dict[str, Any]:
     """Describe a group of jobs sharing one reference for the worker.
@@ -155,6 +163,7 @@ def build_spec(
         "reference": str(reference_override or first.reference_path),
         "options": first.options.to_dict(),
         "serialize_speech": serialize_speech,
+        "speech_output": str(speech_output) if speech_output else None,
         "items": [
             {
                 "id": job.id,

@@ -12,6 +12,8 @@ root = Path(SPECPATH).parent
 # the implementations - so the spec can ask it which modules to bundle rather
 # than keep a second copy of the list that silently rots.
 sys.path.insert(0, str(root / "src"))
+sys.path.insert(0, str(root / "packaging"))
+from release_support import collect_notices, windows_version  # noqa: E402
 from subsyncr import __version__  # noqa: E402
 from subsyncr.core.engines import all_specs  # noqa: E402
 
@@ -66,6 +68,9 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# Inventory exactly the distributions Analysis selected, including lazy engine
+# imports. Metadata supplies versions for Help > Copy diagnostics when frozen.
+a.datas += collect_notices(root, [entry[0] for entry in a.pure])
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -75,6 +80,7 @@ exe = EXE(
     exclude_binaries=True,
     name="SubSyncr",
     icon=str(icon),
+    version=str(windows_version(root, __version__)) if sys.platform == "win32" else None,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -83,7 +89,7 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
-    codesign_identity=None,
+    codesign_identity=None,  # PyInstaller automatically ad-hoc signs on macOS.
     entitlements_file=None,
 )
 
@@ -99,8 +105,8 @@ coll = COLLECT(
 # A bare onedir folder is not something Finder will launch as an app, so on
 # macOS the same folder is also wrapped as SubSyncr.app. The worker re-exec
 # still works from inside it: sys.executable is Contents/MacOS/SubSyncr. The
-# bundle is unsigned, so Gatekeeper blocks the first launch until the user
-# allows it; the README says how.
+# bundle is ad-hoc signed, without Developer ID signing or notarization.
+# Gatekeeper still requires the user to allow it; the README says how.
 if sys.platform == "darwin":
     app = BUNDLE(
         coll,

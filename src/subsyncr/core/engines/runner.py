@@ -13,20 +13,19 @@ engine module is only its argv and how to read its result.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-import contextlib
 from dataclasses import dataclass, field
 import logging
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import time
 from typing import Any
 
 from subsyncr.core import binaries, engines, subtitles
 from subsyncr.core.engines.base import EngineId
-from subsyncr.core.models import OutputPolicy
+from subsyncr.core.models import FileOptions
+from subsyncr.core.output import OutputTransaction
 from subsyncr.core.spawn import creation_flags
 from subsyncr.core.worker import CancelToken, EventChannel
 
@@ -68,23 +67,6 @@ InterpretFn = Callable[[int, str, Path], Outcome]
 RunOneFn = Callable[[str, Path, Path, dict[str, Any], str], Outcome]
 
 
-def backup_original(subtitle: Path) -> Path | None:
-    """Copy a subtitle aside before it is overwritten in place.
-
-    An existing backup is never replaced: a second run would otherwise bury the
-    true original under the already-synced version.
-    """
-    target = subtitle.with_suffix(subtitle.suffix + ".bak")
-    if target.exists():
-        return target
-    try:
-        shutil.copy2(subtitle, target)
-    except OSError as exc:
-        _log.warning("could not back up %s: %s", subtitle, exc)
-        return None
-    return target
-
-
 def clean_line(line: str) -> str:
     return _ANSI.sub("", line).strip()
 
@@ -98,17 +80,6 @@ def percent_in(line: str) -> float | None:
         return max(0.0, min(1.0, float(match.group(1)) / 100.0))
     except ValueError:
         return None
-
-
-def _staging_path(output: Path) -> Path:
-    """A sibling temp file with the same suffix.
-
-    Tools decide the output format from the extension, so the suffix has to
-    survive. Writing here and moving afterwards means a tool that fails halfway
-    cannot leave a truncated file where a good subtitle used to be - which
-    matters most when the output *is* the input.
-    """
-    return output.with_name(f"{output.stem}.subsyncr-partial{output.suffix}")
 
 
 def resolve_binary(engine: EngineId, channel: EventChannel) -> tuple[Path | None, str]:
@@ -176,7 +147,7 @@ def run_each(
         return 0
     options: dict[str, Any] = spec.get("options") or {}
     files: dict[str, Any] = options.get("files") or {}
-    overwrite = str(files.get("output_policy", "")) == OutputPolicy.OVERWRITE.value
+    file_options = FileOptions.from_dict(files)
     reference = str(spec["reference"])
 
     for item in items:
@@ -186,49 +157,47 @@ def run_each(
             continue
         started = time.monotonic()
         subtitle = Path(str(item["subtitle"]))
-        output = subtitle if overwrite else Path(str(item["output"]))
+        output = Path(str(item["output"]))
         channel.emit("progress", job_id=job_id, fraction=None, stage="Aligning")
 
-        if overwrite and files.get("backup_before_overwrite", True):
-            _make_backup(channel, job_id, subtitle)
-
-        staging = _staging_path(output)
         plan: subtitles.Prepared | None = None
         try:
-            # Anything this engine cannot read is converted first, and the
-            # result converted back, so its format limits never become the
-            # user's. Usually a no-op.
-            spec_for_engine = engines.get(engine)
-            plan = subtitles.prepare(
-                reference,
-                subtitle,
-                staging,
-                accepted=spec_for_engine.input_suffixes,
-                writable=spec_for_engine.output_suffixes,
-                workdir=staging.parent,
-                encoding=str(files.get("encoding", "infer")),
-                output_encoding=str(files.get("output_encoding", "utf-8")),
-                reference_is_subtitle=_is_subtitle(reference),
-            )
-            outcome = run_one(
-                plan.reference, plan.subtitle, plan.output, options, job_id
-            )
-            if outcome.status == "succeeded":
-                if plan.output.is_file():
-                    subtitles.finish(
-                        plan,
-                        output_encoding=str(files.get("output_encoding", "utf-8")),
-                    )
-                    output.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(staging, output)
-                else:
-                    outcome.status = "failed"
-                    outcome.error = (
-                        outcome.error or f"{engine} reported success but wrote nothing"
-                    )
-            # Anything else leaves the staged file behind unpromoted, so an
-            # alignment the engine does not trust never reaches the user's
-            # subtitle. The original stays exactly as it was.
+            with OutputTransaction(subtitle, output, file_options) as transaction:
+                staging = transaction.staging
+                # Anything this engine cannot read is converted first, and the
+                # result converted back, so its format limits never become the
+                # user's. Usually a no-op.
+                spec_for_engine = engines.get(engine)
+                plan = subtitles.prepare(
+                    reference,
+                    subtitle,
+                    staging,
+                    accepted=spec_for_engine.input_suffixes,
+                    writable=spec_for_engine.output_suffixes,
+                    workdir=staging.parent,
+                    encoding=str(files.get("encoding", "infer")),
+                    output_encoding=str(files.get("output_encoding", "utf-8")),
+                    reference_is_subtitle=_is_subtitle(reference),
+                )
+                outcome = run_one(
+                    plan.reference, plan.subtitle, plan.output, options, job_id
+                )
+                if outcome.status == "succeeded" and not cancel.cancelled:
+                    if plan.output.is_file():
+                        subtitles.finish(
+                            plan,
+                            output_encoding=str(files.get("output_encoding", "utf-8")),
+                        )
+                        transaction.commit()
+                    else:
+                        outcome.status = "failed"
+                        outcome.error = (
+                            outcome.error
+                            or f"{engine} reported success but wrote nothing"
+                        )
+                # Anything else leaves the staged file behind unpromoted, so an
+                # alignment the engine does not trust never reaches the user's
+                # subtitle. The original stays exactly as it was.
             channel.emit(
                 "result",
                 job_id=job_id,
@@ -253,8 +222,6 @@ def run_each(
         finally:
             if plan is not None:
                 plan.clean()
-            with contextlib.suppress(OSError):
-                staging.unlink(missing_ok=True)
     return 0
 
 
@@ -273,23 +240,6 @@ def _report_cancelled(channel: EventChannel, job_id: str) -> None:
         error="Cancelled",
         duration_seconds=0.0,
     )
-
-
-def _make_backup(channel: EventChannel, job_id: str, subtitle: Path) -> None:
-    if (saved := backup_original(subtitle)) is not None:
-        channel.emit(
-            "log",
-            job_id=job_id,
-            level="INFO",
-            message=f"kept the original at {saved.name}",
-        )
-    else:
-        channel.emit(
-            "log",
-            job_id=job_id,
-            level="WARNING",
-            message="could not write a backup; overwriting anyway",
-        )
 
 
 def run_pairwise(

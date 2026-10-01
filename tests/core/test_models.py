@@ -290,7 +290,7 @@ def test_video_name_drops_the_suffix_so_players_auto_load_it(tmp_path: Path) -> 
     video = tmp_path / "media" / "Show.S01E01.mkv"
     subtitle = tmp_path / "subs" / "loose-name.en.srt"
     resolved = resolve_output(video, subtitle, _files(OutputPolicy.VIDEO_NAME))
-    assert resolved == video.parent / "Show.S01E01.srt"
+    assert resolved == video.parent / "Show.S01E01.en.srt"
 
 
 def test_a_chosen_folder_is_used(tmp_path: Path) -> None:
@@ -351,3 +351,13 @@ def test_a_hand_edited_policy_falls_back_to_the_safe_one() -> None:
         FileOptions.from_dict({"output_policy": "somewhere else"}).output_policy
         is OutputPolicy.BESIDE_SUBTITLE
     )
+
+
+@pytest.mark.parametrize("tag", ["en", "es", "en.forced", "en.sdh", "pt-BR"])
+def test_video_names_keep_subtitle_variants(tmp_path: Path, tag: str):
+    target = resolve_output(
+        tmp_path / "Film.mkv",
+        tmp_path / f"loose.{tag}.srt",
+        _files(OutputPolicy.VIDEO_NAME),
+    )
+    assert target.name == f"Film.{tag.lower()}.srt"

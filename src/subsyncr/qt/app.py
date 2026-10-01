@@ -8,7 +8,7 @@ import sys
 from PySide6.QtCore import QByteArray, QCoreApplication, QSize, Qt
 from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from subsyncr import __version__
 from subsyncr.qt.icons import APP_ICON_SVG
@@ -56,32 +56,34 @@ def create_application(arguments: Sequence[str] | None = None) -> QApplication:
 
 def run_gui(arguments: Sequence[str] | None = None) -> int:
     from subsyncr.core import logger
-    from subsyncr.core.config import AppConfig, log_dir
+    from subsyncr.core.config import AppConfig, data_dir, log_dir
     from subsyncr.qt.errors import ErrorReporter
+    from subsyncr.qt.instance import acquire_gui_lock
     from subsyncr.qt.main_window import MainWindow
     from subsyncr.qt.theme import ThemeManager, apply_theme
 
-    # Before the config is read, so a config that fails to load is logged;
-    # the saved level and retention are applied once it has been.
-    logger.configure(log_dir() / logger.LOG_FILE_NAME)
-    # Loaded once here rather than inside MainWindow, so the saved theme is
-    # in effect before any widget is created.
-    config = AppConfig.load()
-    logger.set_level(config.log_level)
-    logger.set_retention(config.log_retention_days)
     application = create_application(list(arguments or []))
-    # Installed before any window exists, so a failure while building one is
-    # still reported rather than leaving a windowless process behind.
     ErrorReporter.install()
-    # Created before the theme is applied so the first tint is the right one.
-    ThemeManager.for_app(application)
-    apply_theme(config.theme, application)
-    window = MainWindow(config=config)
-    window.show()
+    # Acquire before reading the queue or opening the rotating log file. The
+    # CLI uses a non-persisting queue and does not need this GUI ownership lock.
     try:
+        lock = acquire_gui_lock(data_dir())
+    except (OSError, RuntimeError) as exc:
+        QMessageBox.warning(None, "SubSyncr", str(exc))
+        return 1
+    try:
+        logger.configure(log_dir() / logger.LOG_FILE_NAME)
+        config = AppConfig.load()
+        logger.set_level(config.log_level)
+        logger.set_retention(config.log_retention_days)
+        ThemeManager.for_app(application)
+        apply_theme(config.theme, application)
+        window = MainWindow(config=config)
+        window.show()
         return application.exec()
     finally:
         logger.shutdown()
+        lock.unlock()
 
 
 def main(arguments: Sequence[str] | None = None) -> int:

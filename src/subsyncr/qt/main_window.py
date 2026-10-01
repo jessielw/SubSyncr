@@ -18,6 +18,7 @@ from PySide6.QtGui import (
     QKeySequence,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QLabel,
     QMainWindow,
@@ -233,6 +234,28 @@ class MainWindow(QMainWindow):
             self._show_about,
             tip="Version, engines and where things are stored",
         )
+        self.docs_action = self._action(
+            "Documentation",
+            Icon.ABOUT,
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://github.com/jessielw/SubSyncr#readme")
+            ),
+            tip="Read setup instructions and the first-sync guide",
+        )
+        self.report_action = self._action(
+            "Report a problem",
+            Icon.OPEN_FOLDER,
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://github.com/jessielw/SubSyncr/issues/new/choose")
+            ),
+            tip="Open the issue form; no diagnostics are sent automatically",
+        )
+        self.diagnostics_action = self._action(
+            "Copy diagnostics",
+            Icon.ABOUT,
+            self._copy_diagnostics,
+            tip="Copy versions and platform details without media paths or history",
+        )
         self.quit_action = self._action(
             "Quit",
             Icon.QUIT,
@@ -274,7 +297,16 @@ class MainWindow(QMainWindow):
                 ),
             ),
             ("&Tools", (self.history_action, self.settings_action)),
-            ("&Help", (self.about_action,)),
+            (
+                "&Help",
+                (
+                    self.docs_action,
+                    self.report_action,
+                    self.diagnostics_action,
+                    None,
+                    self.about_action,
+                ),
+            ),
         )
         bar = self.menuBar()
         for title, actions in menus:
@@ -312,6 +344,15 @@ class MainWindow(QMainWindow):
         # sits beside the input before then.
         QDesktopServices.openUrl(
             QUrl.fromLocalFile(str(jobs[0].effective_output.parent))
+        )
+
+    @Slot()
+    def _copy_diagnostics(self) -> None:
+        from subsyncr.core.diagnostics import support_summary
+
+        QApplication.clipboard().setText(support_summary())
+        self.statusBar().showMessage(
+            "Diagnostics copied (no media paths or history)", 5000
         )
 
     @Slot()

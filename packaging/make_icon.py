@@ -21,7 +21,7 @@ from PySide6.QtSvg import QSvgRenderer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from subsyncr.qt.icons import APP_ICON_SVG  # noqa: E402
+from subsyncr.qt.icons import APP_ICON_SVG
 
 # Explorer picks the small sizes, the taskbar and alt-tab the large ones.
 SIZES = (16, 24, 32, 48, 64, 128, 256)
@@ -54,9 +54,10 @@ def render(size: int, renderer: QSvgRenderer) -> QImage:
 def as_png(image: QImage) -> bytes:
     buffer = QBuffer()
     buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-    if not image.save(buffer, "PNG"):
+    # PySide accepts str here at runtime; its stub incorrectly requires bytes.
+    if not image.save(buffer, "PNG"):  # type: ignore[reportCallIssue, reportArgumentType]
         raise SystemExit("could not encode a frame as PNG")
-    return bytes(buffer.data())
+    return bytes(buffer.data().data())
 
 
 def build_ico(frames: dict[int, bytes]) -> bytes:

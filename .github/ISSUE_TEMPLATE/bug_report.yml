@@ -1,0 +1,31 @@
+name: Bug report
+description: Report a reproducible problem in SubSyncr
+body:
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Paste Help > Copy diagnostics. It excludes media paths and job history.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the engine, reference type, subtitle format, and output policy.
+      placeholder: "1. Open...\n2. Choose...\n3. Run..."
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual result
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log excerpt
+      description: Review logs and screenshots for private filenames or paths before posting.
+      render: text

@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Setup and usage
+    url: https://github.com/jessielw/SubSyncr#readme
+    about: Installation, first sync, and platform notes.

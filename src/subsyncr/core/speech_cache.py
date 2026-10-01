@@ -1,28 +1,18 @@
-"""Reuse of ffsubsync serialized speech arrays across a subtitle group.
+"""App-owned speech arrays, keyed by reference identity and extraction settings.
 
-Extracting speech from a video is by far the slowest part of a sync. When one
-video owns several subtitles (``ep.en.srt``, ``ep.es.srt``, ...) only the first
-job needs to pay for it: ``--serialize-speech`` writes a ``.npz`` speech array,
-and passing that ``.npz`` as the *reference* skips ffmpeg entirely.
-
-Two constraints come from ffsubsync itself:
-
-* The serialized path is not configurable - it is always
-  ``os.path.splitext(reference)[0] + ".npz"``, i.e. beside the media file. We
-  move it into our own cache directory afterwards so we never leave debris in
-  the user's folders.
-* The array bakes in the VAD, start offset, frame rate, non-speech label,
-  duration limit and source stream (audio or PGS) used to build it, so all of
-  those key the cache.
+Workers receive a unique staging path inside this cache. They never create a
+sidecar in a media folder, and harvest accepts only paths this instance issued.
 """
 
 from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
 from pathlib import Path
-import shutil
+import tempfile
 import threading
+import zipfile
 
 from subsyncr.core.models import FFSubSyncOptions
 from subsyncr.core.scanner import needs_ffmpeg
@@ -32,7 +22,7 @@ def _fingerprint(reference: Path, options: FFSubSyncOptions) -> str:
     """Stable id for "this file, extracted these settings"."""
     try:
         stat = reference.stat()
-        identity = f"{reference.resolve()}|{stat.st_size}|{int(stat.st_mtime)}"
+        identity = f"{reference.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
     except OSError:
         identity = str(reference)
     parts = "|".join(str(part) for part in options.speech_cache_key())
@@ -49,6 +39,7 @@ class SpeechCache:
         # rather than block a worker thread.
         self._producing: dict[str, threading.Lock] = {}
         self._guard = threading.Lock()
+        self._staged: set[Path] = set()
 
     def _lock_for(self, key: str) -> threading.Lock:
         with self._guard:
@@ -64,10 +55,17 @@ class SpeechCache:
         candidate = self.cached_path(reference, options)
         return candidate if candidate.is_file() else None
 
-    @staticmethod
-    def sidecar_for(reference: Path) -> Path:
-        """Where ffsubsync will write when ``--serialize-speech`` is set."""
-        return reference.with_suffix(".npz")
+    def stage(self) -> Path:
+        """Reserve a unique file on the cache filesystem for one worker."""
+        self.directory.mkdir(parents=True, exist_ok=True)
+        handle, name = tempfile.mkstemp(
+            prefix=".speech-", suffix=".npz", dir=self.directory
+        )
+        os.close(handle)
+        path = Path(name).resolve()
+        with self._guard:
+            self._staged.add(path)
+        return path
 
     def claim_producer(self, key: str) -> bool:
         """Try to become the job that builds the array for this group."""
@@ -81,32 +79,41 @@ class SpeechCache:
             with contextlib.suppress(RuntimeError):
                 lock.release()
 
-    def harvest(self, reference: Path, options: FFSubSyncOptions) -> Path | None:
-        """Move the sidecar ffsubsync just wrote into the cache.
-
-        Returns the cached path, or ``None`` if nothing was produced.
-        """
-        sidecar = self.sidecar_for(reference)
-        if not sidecar.is_file():
-            return None
+    def harvest(
+        self, reference: Path, options: FFSubSyncOptions, staged: Path
+    ) -> Path | None:
+        """Publish only the staging file issued for this extraction."""
+        with self._guard:
+            if staged not in self._staged:
+                raise ValueError("Speech staging file is not owned by this cache")
+            self._staged.remove(staged)
         destination = self.cached_path(reference, options)
         try:
-            self.directory.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(sidecar), str(destination))
-        except OSError:
-            # Leaving a stray .npz beside the media is worse than losing the
-            # cache entry, so make sure it goes either way.
+            if not staged.is_file() or staged.stat().st_size == 0:
+                return None
+            # Cancellation can interrupt NumPy halfway through a ZIP write.
+            # Keep such files out of the persistent cache rather than poisoning
+            # every later sync against this reference.
+            with zipfile.ZipFile(staged) as archive:
+                if (
+                    "speech.npy" not in archive.namelist()
+                    or archive.testzip() is not None
+                ):
+                    return None
+            os.replace(staged, destination)
+            return destination
+        except (OSError, zipfile.BadZipFile, EOFError):
+            return None  # A cache failure must not fail a completed sync.
+        finally:
             with contextlib.suppress(OSError):
-                sidecar.unlink()
-            return None
-        return destination
+                staged.unlink(missing_ok=True)
 
     def size_bytes(self) -> int:
         if not self.directory.is_dir():
             return 0
         return sum(
             path.stat().st_size
-            for path in self.directory.glob("*.npz")
+            for path in self.directory.glob("[!.]*.npz")
             if path.is_file()
         )
 
@@ -115,7 +122,7 @@ class SpeechCache:
         if not self.directory.is_dir():
             return 0
         removed = 0
-        for path in self.directory.glob("*.npz"):
+        for path in self.directory.glob("[!.]*.npz"):
             with contextlib.suppress(OSError):
                 path.unlink()
                 removed += 1

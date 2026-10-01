@@ -1,0 +1,55 @@
+{
+  "LGPL-3.0-only.txt": {
+    "source": "https://raw.githubusercontent.com/qt/qtbase/v6.11.2/LICENSES/LGPL-3.0-only.txt",
+    "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768"
+  },
+  "GPL-3.0-only.txt": {
+    "source": "https://raw.githubusercontent.com/qt/qtbase/v6.11.2/LICENSES/GPL-3.0-only.txt",
+    "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+  },
+  "Python.txt": {
+    "source": "https://raw.githubusercontent.com/python/cpython/v3.12.13/LICENSE",
+    "sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf"
+  },
+  "Font-Awesome-5.txt": {
+    "source": "https://raw.githubusercontent.com/FortAwesome/Font-Awesome/5.15.4/LICENSE.txt",
+    "sha256": "e779748dfe75e84f974df3c7bc07f842011a100159158b0f1f49b2f2a5a515cb"
+  },
+  "Font-Awesome-6.txt": {
+    "source": "https://raw.githubusercontent.com/FortAwesome/Font-Awesome/6.7.2/LICENSE.txt",
+    "sha256": "9b914eae88817d63b576eab5aafde7068c7a1abae125d7cdfb034f1da43a9afc"
+  },
+  "Phosphor.txt": {
+    "source": "https://raw.githubusercontent.com/phosphor-icons/phosphor-icons/master/LICENSE",
+    "sha256": "687fbe52d0eb5c2353eca27a4037e889145ee0b584d3b1abf67581c4a4a4e47c"
+  },
+  "Material-Design.txt": {
+    "source": "https://raw.githubusercontent.com/Templarian/MaterialDesign/master/LICENSE",
+    "sha256": "3bae6305bcaa6d10219b999f65c342034c2d40b1c0e8567fa08605e73ccba829"
+  },
+  "Remix-Icon.txt": {
+    "source": "https://raw.githubusercontent.com/Remix-Design/RemixIcon/v2.5.0/License",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  },
+  "Codicons.txt": {
+    "source": "https://raw.githubusercontent.com/microsoft/vscode-codicons/0.0.36/LICENSE",
+    "sha256": "d6239afa918961b465b07bf7411cbe34ff6685854f58553db7966f4881a0211f"
+  },
+  "Qt-third-party.html": {
+    "source": "https://doc.qt.io/qt-6/licenses-used-in-qt.html",
+    "sha256": "4a3901f264ad2dca648d451efb51e638dd7e8e70a31f9d7001019b04b59fe55c"
+  },
+  "Elusive-Icons.txt": {
+    "source": "https://raw.githubusercontent.com/dovy/elusive-icons/master/README.md",
+    "sha256": "928ca73be34cff76f201165b576244a3a3ef7bfc0dbd59bd611b03cab1031439"
+  },
+  "OFL-1.1.txt": {
+    "source": "https://raw.githubusercontent.com/FortAwesome/Font-Awesome/6.7.2/LICENSE.txt",
+    "note": "Verbatim SIL OFL 1.1 license section from upstream font notice",
+    "sha256": "0471e7a312e86ac8322bc7424a444cc3e5c426f30c120fd5c1a91d5d01c6b880"
+  },
+  "faust-cchardet-COPYING.txt": {
+    "source": "https://raw.githubusercontent.com/faust-streaming/cChardet/master/COPYING",
+    "sha256": "107a29ccdd2d778aa2df5462f85dddfa099059abd22e064e07ec2cc9bafc37cd"
+  }
+}

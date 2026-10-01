@@ -59,12 +59,19 @@ jobs:
             libxcb-xinerama0 libxcb-randr0 libxcb-render-util0 libxcb-image0
 
       - name: Install dependencies
-        run: uv sync --frozen --group dev
+        run: uv sync --frozen --group dev --group build
 
-      # The slow tests spawn real worker processes; the frozen smoke test
-      # below covers that path against the build that actually ships.
-      - name: Test
-        run: uv run pytest -m "not slow"
+      - name: Lint
+        run: uv run --no-sync ruff check .
+
+      - name: Formatting
+        run: uv run --no-sync ruff format --check .
+
+      - name: Types
+        run: uv run --no-sync basedpyright
+
+      - name: Test (including real worker processes)
+        run: uv run --no-sync pytest
 
       - name: Resolve version
         id: version
@@ -81,21 +88,10 @@ jobs:
           echo "archive=SubSyncr-$version-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
 
       - name: Build
-        run: uv run --group build python build.py
+        run: uv run --frozen --group build python build.py
 
-      # The CLI shares the executable, so `doctor` proves the engines were
-      # bundled: a missing hidden import reports an engine as unavailable. On
-      # Windows the executable is windowed and has no stdout to check.
-      - name: Smoke test frozen build
-        if: runner.os != 'Windows'
-        shell: bash
-        env:
-          SUBSYNCR_DATA_DIR: ${{ runner.temp }}/subsyncr-smoke
-        run: |
-          output=$(dist/SubSyncr/SubSyncr doctor || true)
-          echo "$output"
-          grep -Eq '^  ffsubsync +ready' <<< "$output"
-          grep -Eq '^  autosubsync +ready' <<< "$output"
+      # build.py runs the real frozen sync on every platform, including the
+      # Windows windowed executable and Contents/MacOS inside the shipped app.
 
       - name: Archive (Windows)
         if: runner.os == 'Windows'
@@ -116,6 +112,17 @@ jobs:
         run: >-
           ditto -c -k --sequesterRsrc --keepParent dist/SubSyncr.app
           "${{ steps.version.outputs.archive }}.zip"
+
+      - name: Verify archived app (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          extracted=$(mktemp -d "$RUNNER_TEMP/subsyncr-archive.XXXXXX")
+          ditto -x -k "${{ steps.version.outputs.archive }}.zip" "$extracted"
+          app="$extracted/SubSyncr.app"
+          /usr/bin/codesign --verify --all-architectures --deep --strict --verbose=2 "$app"
+          /usr/bin/codesign --display --verbose=4 "$app"
+          uv run --no-sync python packaging/smoke_test.py "$app/Contents/MacOS/SubSyncr"
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -140,10 +147,17 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd artifacts
+          sha256sum SubSyncr-* > SHA256SUMS.txt
+
       - name: Create draft release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
         with:
           draft: true
           name: SubSyncr ${{ github.ref_name }}
+          generate_release_notes: true
           files: artifacts/*
           fail_on_unmatched_files: true

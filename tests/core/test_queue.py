@@ -7,11 +7,11 @@ state transitions, persistence and the speech-cache handshake.
 from __future__ import annotations
 
 from collections.abc import Callable
-from pathlib import Path
 import threading
 import time
 from typing import Any, ClassVar
 
+import numpy as np
 import pytest
 
 from subsyncr.core import queue as queue_module
@@ -49,8 +49,8 @@ class FakeProcess:
     ) -> dict[str, SyncResult]:
         self._started.set()
         if self.spec["serialize_speech"]:
-            # ffsubsync writes the speech array beside the reference file.
-            Path(self.spec["reference"]).with_suffix(".npz").write_bytes(b"speech")
+            # The worker writes only its assigned cache staging file.
+            np.savez(self.spec["speech_output"], speech=[0, 1, 0])
         if on_progress is not None:
             # job_id None means the group-wide extraction.
             on_progress(None, 0.5, "Extracting speech")
@@ -623,3 +623,41 @@ def test_skipping_an_unable_engine_says_why(
     queue.shutdown()
     assert scripted.engines_used == ["alass"]
     assert any("ffsubsync cannot handle these files" in log[2] for log in logs)
+
+
+@pytest.mark.parametrize("replace_output", [False, True])
+def test_colliding_group_outputs_are_rejected(build_queue, make_job, replace_output):
+    queue = build_queue()
+    first = make_job("A", group_key="group")
+    second = make_job("B", group_key="group")
+    second.reference_path = first.reference_path
+    second.output_path = first.output_path
+    first.options.files.replace_output = replace_output
+    second.options.files.replace_output = replace_output
+    queue.add([first, second])
+    _drain(queue)
+    assert all(job.status is JobStatus.FAILED for job in (first, second))
+    assert all("conflicts" in job.last_error for job in (first, second))
+    assert not FakeProcess.instances
+
+
+def test_output_cannot_replace_another_queued_input(build_queue, make_job):
+    queue = build_queue()
+    first, second = make_job("A"), make_job("B")
+    first.output_path = second.subtitle_path
+    first.options.files.replace_output = True
+    queue.add([first, second])
+    _drain(queue)
+    assert first.status is JobStatus.FAILED
+    assert "conflicts" in first.last_error
+
+
+def test_cache_does_not_touch_existing_media_sidecar(build_queue, make_job):
+    queue = build_queue()
+    job = make_job("Film")
+    sidecar = job.reference_path.with_suffix(".npz")
+    sidecar.write_bytes(b"unrelated user data")
+    queue.add([job])
+    _drain(queue)
+    assert job.status is JobStatus.SUCCEEDED
+    assert sidecar.read_bytes() == b"unrelated user data"

@@ -21,3 +21,13 @@ wheels/
 .DS_Store
 Thumbs.db
 
+
+# Local preparation and assistant state
+.claude/
+.codex/
+.agents/
+.mypy_cache/
+HANDOFF-*.md
+.env
+.env.*
+!.env.example

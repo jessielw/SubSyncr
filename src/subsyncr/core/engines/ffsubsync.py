@@ -25,8 +25,8 @@ import re
 import time
 from typing import Any
 
-from subsyncr.core.engines.runner import backup_original
-from subsyncr.core.models import OutputPolicy
+from subsyncr.core.models import FileOptions, OutputPolicy
+from subsyncr.core.output import OutputTransaction
 from subsyncr.core.scanner import needs_ffmpeg
 from subsyncr.core.worker import CancelToken, EventChannel
 
@@ -187,10 +187,7 @@ def run_group(spec: dict[str, Any], channel: EventChannel, cancel: CancelToken) 
     if not items:
         return 0
     options: dict[str, Any] = spec.get("options") or {}
-    overwrite = (
-        str((options.get("files") or {}).get("output_policy", ""))
-        == OutputPolicy.OVERWRITE.value
-    )
+    file_options = FileOptions.from_dict(options.get("files"))
 
     scraper = _ResultScraper(channel)
     logger = logging.getLogger("ffsubsync")
@@ -255,12 +252,12 @@ def run_group(spec: dict[str, Any], channel: EventChannel, cancel: CancelToken) 
         extraction_seconds = time.monotonic() - extraction_started
         channel.emit("extracted", seconds=extraction_seconds)
 
-        if spec.get("serialize_speech"):
-            # ffsubsync only ever writes this beside the reference; the parent
-            # moves it into the cache directory afterwards.
+        if spec.get("speech_output"):
+            # The parent owns this unique file inside its cache directory.
+            # Never create or harvest a sidecar beside the user's media.
             try:
                 np.savez_compressed(
-                    os.path.splitext(args.reference)[0] + ".npz",
+                    str(spec["speech_output"]),
                     speech=reference_pipe.transform(args.reference),
                 )
             except Exception as exc:
@@ -288,33 +285,25 @@ def run_group(spec: dict[str, Any], channel: EventChannel, cancel: CancelToken) 
             scraper.reset()
             scraper.item_id = str(item["id"])
             subtitle = Path(str(item["subtitle"]))
-            output = subtitle if overwrite else Path(str(item["output"]))
+            output = Path(str(item["output"]))
             channel.emit(
                 "progress", job_id=str(item["id"]), fraction=None, stage="Aligning"
             )
             try:
-                if overwrite and (options.get("files") or {}).get(
-                    "backup_before_overwrite", True
-                ):
-                    if (saved := backup_original(subtitle)) is not None:
-                        channel.emit(
-                            "log",
-                            job_id=str(item["id"]),
-                            level="INFO",
-                            message=f"kept the original at {saved.name}",
-                        )
-                    else:
-                        channel.emit(
-                            "log",
-                            job_id=str(item["id"]),
-                            level="WARNING",
-                            message="could not write a backup; overwriting anyway",
-                        )
-                args.srtin = [str(subtitle)]
-                args.srtout = None if overwrite else str(output)
-                result: dict[str, Any] = {}
-                synced = bool(try_sync(args, reference_pipe, result))
-                status, error = _classify(synced, output, scraper)
+                with OutputTransaction(subtitle, output, file_options) as transaction:
+                    # Rebind both paths for every item. Even overwrite mode uses
+                    # an explicit temporary output so a failed encoder cannot
+                    # truncate the only good copy of a subtitle.
+                    args.overwrite_input = False
+                    args.srtin = [str(subtitle)]
+                    args.srtout = str(transaction.staging)
+                    result: dict[str, Any] = {}
+                    synced = bool(try_sync(args, reference_pipe, result))
+                    status, error = _classify(synced, transaction.staging, scraper)
+                    if cancel.cancelled:
+                        status, error = "cancelled", "Cancelled"
+                    elif status == "succeeded":
+                        transaction.commit()
                 channel.emit(
                     "result",
                     job_id=str(item["id"]),

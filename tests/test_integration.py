@@ -164,7 +164,7 @@ def test_low_quality_gate_reports_skipped_not_succeeded(tmp_path: Path) -> None:
 
     assert result.status is JobStatus.SKIPPED_LOW_QUALITY
     assert result.quality_reasons
-    assert job.output_path.is_file(), "ffsubsync still writes the untouched original"
+    assert not job.output_path.exists(), "untrusted output must not be published"
 
 
 def test_cancellation_kills_the_child(
@@ -248,3 +248,51 @@ def test_no_backup_when_not_overwriting(
     reference, subtitle = make_pair(5.0)
     assert _run_one(_job(reference, subtitle)).status is JobStatus.SUCCEEDED
     assert not subtitle.with_suffix(subtitle.suffix + ".bak").exists()
+
+
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_encoding_failure_preserves_existing_file(make_pair, overwrite):
+    reference, subtitle = make_pair(5.0)
+    subtitle.write_text(
+        subtitle.read_text(encoding="utf-8").replace("Line", "Caf\u00e9"),
+        encoding="utf-8",
+    )
+    job = _job(
+        reference,
+        subtitle,
+        overwrite_input=overwrite,
+        encoding="utf-8",
+        output_encoding="ascii",
+        replace_output=True,
+    )
+    target = job.effective_output
+    if not overwrite:
+        target.write_bytes(b"previous good output")
+    before = target.read_bytes()
+    assert _run_one(job).status is JobStatus.FAILED
+    assert target.read_bytes() == before
+    assert not list(target.parent.glob(".subsyncr-output-*"))
+
+
+def test_unusable_backup_stops_real_overwrite(make_pair):
+    reference, subtitle = make_pair(5.0)
+    original = subtitle.read_bytes()
+    subtitle.with_suffix(".srt.bak").mkdir()
+    result = _run_one(_job(reference, subtitle, overwrite_input=True))
+    assert result.status is JobStatus.FAILED
+    assert "backup" in result.error.lower()
+    assert subtitle.read_bytes() == original
+
+
+def test_low_quality_keeps_previous_output(make_pair):
+    reference, subtitle = make_pair(5.0)
+    job = _job(
+        reference,
+        subtitle,
+        skip_sync_on_low_quality=True,
+        min_score=1e9,
+        replace_output=True,
+    )
+    job.output_path.write_bytes(b"previous good output")
+    assert _run_one(job).status is JobStatus.SKIPPED_LOW_QUALITY
+    assert job.output_path.read_bytes() == b"previous good output"

@@ -15,6 +15,7 @@ import contextlib
 from dataclasses import dataclass
 import json
 import logging
+from pathlib import Path
 import threading
 
 from subsyncr.core import logger
@@ -28,6 +29,7 @@ from subsyncr.core.engine import (
 )
 from subsyncr.core.engines import EngineId
 from subsyncr.core.models import JobStatus, SyncJob, SyncResult
+from subsyncr.core.output import same_path
 from subsyncr.core.scanner import needs_ffmpeg
 from subsyncr.core.speech_cache import SpeechCache
 from subsyncr.core.store import JobStore
@@ -427,8 +429,40 @@ class SyncQueue:
         # Validation is per job: one bad subtitle should not sink its siblings.
         runnable: list[SyncJob] = []
         results: dict[str, SyncResult] = {}
+        # Inspect the whole queue, including other running groups, before any
+        # worker can publish. Ambiguous destinations require user correction;
+        # replace_output only authorizes replacing an existing output, not
+        # throwing away a different job's result or input.
+        with self._lock:
+            candidates = {job.id: job for job in [*self._jobs, *group]}
+            active = [
+                job
+                for job in candidates.values()
+                if job.status in (JobStatus.QUEUED, JobStatus.RUNNING)
+            ]
+            conflicts: dict[str, str] = {}
+            for job in group:
+                for other in active:
+                    if job.id == other.id:
+                        continue
+                    if any(
+                        same_path(job.effective_output, path)
+                        for path in (
+                            other.effective_output,
+                            other.subtitle_path,
+                            other.reference_path,
+                        )
+                    ):
+                        conflicts[job.id] = (
+                            "Output conflicts with another queued job: "
+                            f"{job.effective_output}. Choose distinct output names "
+                            "or remove the conflicting job."
+                        )
+                        break
         for job in group:
             try:
+                if job.id in conflicts:
+                    raise EngineError(conflicts[job.id])
                 validate(job)
             except EngineError as exc:
                 results[job.id] = SyncResult(
@@ -490,6 +524,7 @@ class SyncQueue:
         serialize = False
         used_cache = False
         producer_key = ""
+        speech_output: Path | None = None
 
         # The .npz cache holds ffsubsync speech arrays and means nothing to the
         # other engines. A subtitle reference has no expensive extraction either.
@@ -505,17 +540,27 @@ class SyncQueue:
                 reference_override = hit
                 used_cache = True
             else:
-                # Only one process may write the sidecar for a given reference.
+                # One producer per cache key; each owns a distinct staging file.
                 producer_key = str(
                     self._cache.cached_path(first.reference_path, speech_options)
                 )
                 serialize = self._cache.claim_producer(producer_key)
+                if serialize:
+                    try:
+                        speech_output = self._cache.stage()
+                    except OSError:
+                        self._cache.release_producer(producer_key)
+                        serialize = False
+                        _log.warning(
+                            "Speech cache is not writable; syncing without caching"
+                        )
 
         process = SyncProcess(
             build_spec(
                 runnable,
                 reference_override=reference_override,
                 serialize_speech=serialize,
+                speech_output=speech_output,
                 engine=engine,
             )
         )
@@ -540,10 +585,12 @@ class SyncQueue:
                 ),
             )
         finally:
-            if serialize and producer_key:
-                # Harvest even on failure so no stray .npz is left beside media.
+            if serialize and producer_key and speech_output is not None:
+                # Even failure cleanup can touch only our own staging file.
                 with contextlib.suppress(Exception):
-                    self._cache.harvest(first.reference_path, first.options.ffsubsync)
+                    self._cache.harvest(
+                        first.reference_path, first.options.ffsubsync, speech_output
+                    )
                 self._cache.release_producer(producer_key)
 
         for result in produced.values():

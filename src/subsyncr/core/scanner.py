@@ -67,6 +67,13 @@ def is_generated_output(path: Path, suffix: str = "") -> bool:
 def iter_files(folder: Path, *, recursive: bool) -> Iterator[Path]:
     iterator = folder.rglob("*") if recursive else folder.glob("*")
     for path in iterator:
+        # A killed worker may leave staging behind. These are incomplete or
+        # untrusted results, never fresh subtitle inputs on the next scan.
+        if any(
+            part.startswith((".subsyncr-output-", ".subsyncr-backup-"))
+            for part in path.parts
+        ):
+            continue
         if path.is_file():
             yield path
 

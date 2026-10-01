@@ -723,8 +723,19 @@ def resolve_output(
         case OutputPolicy.BESIDE_VIDEO:
             return video.parent / f"{subtitle.stem}{suffix}{extension}"
         case OutputPolicy.VIDEO_NAME:
-            # No suffix: the point is a name the player will auto-load.
-            return video.parent / f"{video.stem}{extension}"
+            # Keep language and accessibility variants distinct while still
+            # using the video's basename for automatic player discovery.
+            from subsyncr.core.language import parse_subtitle_tags
+
+            tags = parse_subtitle_tags(subtitle)
+            parts = [video.stem]
+            if tags.language:
+                parts.append(tags.language)
+            if tags.forced:
+                parts.append("forced")
+            if tags.sdh:
+                parts.append("sdh")
+            return video.parent / (".".join(parts) + extension)
         case OutputPolicy.DESKTOP:
             return _desktop() / f"{subtitle.stem}{suffix}{extension}"
         case OutputPolicy.FOLDER:

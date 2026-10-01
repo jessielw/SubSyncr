@@ -26,10 +26,29 @@ fills, so the interesting part here is the **matching and review**, not the sync
    `brew install ffmpeg` on macOS), then either put them on `PATH` or point
    Settings at their folder. Syncing against a subtitle file needs neither.
 
-**macOS:** the app is not signed or notarized, so Gatekeeper blocks the first
-launch. Right-click `SubSyncr.app` and choose **Open**; on macOS 15 and later,
+**macOS:** the app is ad-hoc signed, without Apple Developer ID signing or
+notarization, so Gatekeeper can block the first launch. If you trust the download,
 try to open it once, then allow it under System Settings → Privacy & Security →
-**Open Anyway**.
+**Open Anyway**. See [Apple's instructions](https://support.apple.com/en-us/102445).
+
+## Your first sync
+
+1. Open **Match folders**, choose your video and subtitle folders, and click **Scan**.
+2. Review each proposed pair. Uncheck unwanted rows or double-click to correct a match.
+3. Queue the selected pairs and click **Start queue**. By default, results appear
+   beside their inputs as `.synced.srt` (or the original supported text format).
+4. Check the result and play a sample before using **Overwrite**. If backup creation
+   fails, the app refuses to overwrite. Failed and low-quality results keep existing
+   files intact.
+
+**Help > Copy diagnostics** copies versions and platform details for a bug report,
+without media paths or job history. **Help > Report a problem** opens the issue form.
+
+![Matching sample video and subtitle filenames](docs/images/match-light.png)
+
+Example review using sample filenames. The app also has a dark theme:
+
+![SubSyncr queue in dark mode](docs/images/queue-dark.png)
 
 ## What it does
 
@@ -40,7 +59,7 @@ try to open it once, then allow it under System Settings → Privacy & Security 
   all pair with the same video instead of competing for it, and all sync from a
   single audio extraction.
 - **A real queue.** Parallel by default, per-job cancellation, retry,
-  crash-recoverable pending work, and searchable history with offsets and scores.
+  crash-recoverable pending work, one GUI per data folder, and searchable history with offsets and scores.
 - **Four engines with a fallback chain.** Pick ffsubsync, alass, lapse or
   autosubsync per job, and set in Settings which engines to retry with, in
   order, when one fails or returns a low-quality verdict. alass and lapse are
@@ -64,8 +83,10 @@ try to open it once, then allow it under System Settings → Privacy & Security 
 - **Light and dark, following the OS** or pinned in Settings, with icons and
   status colours that re-tint live rather than staying stuck at whatever the
   scheme was on launch.
-- **A backup before any in-place overwrite**, and an existing `.bak` is never
-  replaced, so re-running cannot bury the true original.
+- **Safe file publication.** Every engine writes to a temporary file first.
+  Requested backups must succeed before an in-place overwrite; an existing `.bak`
+  is never replaced. Conflicting queue destinations are rejected, and video-based
+  names retain language/forced/SDH tags.
 - **A log file** with its level and retention set in Settings, and an
   **Open log folder** button there and on error dialogs. Sync workers forward
   their log records to the main process, so one file covers the whole run.
@@ -95,6 +116,10 @@ uv run subsyncr doctor     # report paths, ffmpeg status and versions
 ```
 
 ### CLI
+
+On Windows the release executable is a windowed GUI app. Use the source installation
+below for terminal CLI commands. Linux and macOS executables support both modes.
+
 
 ```powershell
 uv run subsyncr match  D:\media\Season01              # propose pairings only
@@ -205,15 +230,18 @@ Two neighbouring ffsubsync options are deliberately **not** wired up:
 
 - `retval` stays `0` even when an alignment fails. Success needs `retval == 0`
   **and** `sync_was_successful` **and** the output file existing.
-- `--skip-sync-on-low-quality` writes the *original* subtitles to the output path.
-  A file being there proves nothing; those jobs report **Low quality**, not Done.
+- `--skip-sync-on-low-quality` writes the *original* subtitles to its output path.
+  SubSyncr keeps that output temporary and discards it; those jobs report
+  **Low quality** and leave the final destination untouched.
 
 ## Development
 
 ```powershell
 uv run pytest
 uv run pytest -m "not slow"          # skip tests that spawn real ffsubsync
-uv run ruff check . ; uv run ruff format --check . ; uv run basedpyright
+uv run ruff check .
+uv run ruff format --check .
+uv run --group build basedpyright
 ```
 
 Tests need neither ffmpeg nor a display: the integration tests use subtitle files
@@ -228,11 +256,14 @@ PyInstaller cannot cross-compile, so run this on each target OS:
 uv run --group build python build.py
 ```
 
+The build also verifies a real subtitle-to-subtitle sync through the packaged
+worker, including the macOS `.app` executable. It needs no ffmpeg or network.
 The onedir bundle lands in `dist/SubSyncr`. The executable wears three hats and
 dispatches on its first argument: `--sync-worker` for the child process, a
 subcommand for the CLI, and anything else for the GUI. ffmpeg is deliberately not
-bundled. On macOS the same folder is also wrapped as `dist/SubSyncr.app`,
-unsigned.
+bundled. On macOS the same folder is also wrapped as `dist/SubSyncr.app` and
+ad-hoc signed by PyInstaller. Signing or signature verification failures stop the
+build. Release CI also verifies the extracted ZIP's signature and runs its worker.
 
 The window and executable icons are rendered from the mark embedded in
 `qt/icons.py`, so nothing has to be found on disk at runtime. After changing the
@@ -246,3 +277,13 @@ are SQLite, and cached speech arrays and downloaded engine binaries live under
 the platform cache directory. The log file sits in the platform log directory
 (on Windows, `%LOCALAPPDATA%\SubSyncr\SubSyncr\Logs\subsyncr.log`) and
 rotates at midnight. Set `SUBSYNCR_DATA_DIR` to move all of it.
+
+## Release and licensing
+
+See [the changelog](CHANGELOG.md), [third-party notices](THIRD_PARTY.md), and
+[the release checklist](docs/RELEASING.md). Release downloads include a SHA-256
+manifest. The build collects dependency versions and license files into the bundle.
+
+On Linux/macOS, creating a new output or backup safely requires a filesystem with
+hard-link support; unsupported filesystems fail without replacing existing files.
+Use a local data folder for the application queue and settings.
