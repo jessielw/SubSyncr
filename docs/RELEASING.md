@@ -13,7 +13,7 @@
    the final ZIP, verifies its nested signatures, and reruns the frozen sync.
 4. Inspect the bundle's `THIRD_PARTY_INVENTORY.json`, package license files, Qt
    library attribution, and font notices. Refresh `packaging/licenses` and its
-   provenance hashes if dependencies change. Verify exact source availability
+   `sources.json` if dependencies change. Verify exact source availability
    and redistribution requirements for the libraries in each platform archive.
 5. Run the Release workflow manually to generate candidate artifacts for all four
    targets. Check every job and test the downloaded archives before tagging.

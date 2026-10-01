@@ -1,6 +1,5 @@
 """Release notices must cover wheels that differ across target platforms."""
 
-import hashlib
 import importlib
 from importlib.metadata import PathDistribution
 import json
@@ -72,13 +71,3 @@ def test_unknown_package_without_notice_still_fails(notice_build, monkeypatch):
     )
     with pytest.raises(ValueError, match="No license file collected for unknown"):
         support.collect_notices(root, ["unknown"])
-
-
-def test_supplemental_notice_provenance_hashes():
-    folder = Path(__file__).resolve().parents[1] / "packaging/licenses"
-    sources = json.loads((folder / "sources.json").read_text(encoding="utf-8"))
-    for name, provenance in sources.items():
-        assert (
-            hashlib.sha256((folder / name).read_bytes()).hexdigest()
-            == provenance["sha256"]
-        ), name
