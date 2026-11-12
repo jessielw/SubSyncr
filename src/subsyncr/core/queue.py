@@ -176,6 +176,7 @@ class SyncQueue:
         # Jobs whose PGS setting is an ffmpeg specifier we cannot map; the
         # worker hands those to ffsubsync as they are.
         self._unresolvable: set[str] = set()
+        self._probers: list[threading.Thread] = []
         if self._jobs:
             self._resolve_in_background()
 
@@ -384,9 +385,10 @@ class SyncQueue:
             self._shutdown = True
             self._draining = False
             workers = list(self._workers)
+            probers = list(self._probers)
         self.cancel_all()
-        for worker in workers:
-            worker.join(timeout=timeout)
+        for thread in (*workers, *probers):
+            thread.join(timeout=timeout)
         with self._lock:
             self._persist()
 
@@ -435,6 +437,8 @@ class SyncQueue:
                 )
                 choice = reference.choose(tracks, job.options, job.language)
                 with self._lock:
+                    if self._shutdown:
+                        return
                     if not self._needs_resolving(job):
                         continue
                     if choice is None:
@@ -444,6 +448,8 @@ class SyncQueue:
                     changed.append(job)
             if changed:
                 with self._lock:
+                    if self._shutdown:
+                        return  # shutdown() has saved, and the store may be closed.
                     self._persist()
         for job in changed:
             self._emit_job_changed(job)
@@ -460,7 +466,13 @@ class SyncQueue:
             if draining:
                 self._ensure_workers()
 
-        threading.Thread(target=run, name="subsyncr-probe", daemon=True).start()
+        thread = threading.Thread(target=run, name="subsyncr-probe", daemon=True)
+        with self._lock:
+            if self._shutdown:
+                return
+            self._probers = [item for item in self._probers if item.is_alive()]
+            self._probers.append(thread)
+        thread.start()
 
     def _claim_group(self) -> list[SyncJob]:
         """Take every runnable job that shares the next group's key."""

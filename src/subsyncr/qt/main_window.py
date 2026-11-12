@@ -10,6 +10,7 @@ import time
 from PySide6.QtCore import QByteArray, QPoint, QSettings, QSize, Qt, QTimer, QUrl, Slot
 from PySide6.QtGui import (
     QAction,
+    QActionGroup,
     QCloseEvent,
     QDesktopServices,
     QDragEnterEvent,
@@ -30,7 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from subsyncr import __version__
-from subsyncr.core import engines, logger
+from subsyncr.core import engines, logger, reference
 from subsyncr.core.config import (
     AppConfig,
     cache_dir,
@@ -39,10 +40,11 @@ from subsyncr.core.config import (
     database_path,
     speech_cache_dir,
 )
+from subsyncr.core.embedded import IMAGE_CODECS, PGS_CODEC
 from subsyncr.core.engines import EngineId
-from subsyncr.core.models import JobStatus, SyncJob
+from subsyncr.core.models import JobStatus, ReferenceTrack, SyncJob
 from subsyncr.core.queue import QueueCounts, SyncQueue
-from subsyncr.core.scanner import MEDIA_EXTENSIONS, SUBTITLE_EXTENSIONS
+from subsyncr.core.scanner import MEDIA_EXTENSIONS, SUBTITLE_EXTENSIONS, needs_ffmpeg
 from subsyncr.core.speech_cache import SpeechCache
 from subsyncr.core.store import JobStore
 from subsyncr.qt.add_job import AddJobDialog
@@ -333,7 +335,81 @@ class MainWindow(QMainWindow):
                 menu.addSeparator()
             else:
                 menu.addAction(action)
+        menu.addSeparator()
+        menu.addMenu(self._reference_menu(menu))
         menu.exec(self.table.viewport().mapToGlobal(position))
+
+    def _reference_menu(self, parent: QMenu) -> QMenu:
+        """Pick what the selected jobs align against.
+
+        Lists the video's own tracks when every selected job shares one video;
+        across several videos only the choices that mean the same thing for
+        each of them are offered.
+        """
+        menu = QMenu("Sync against", parent)
+        jobs = [
+            job
+            for job in self.model.jobs_for_rows(self.table.selected_rows())
+            if job.status not in (JobStatus.RUNNING, JobStatus.SUCCEEDED)
+            and needs_ffmpeg(job.reference_path)
+            and job.options.engine is not EngineId.LAPSE
+        ]
+        if not jobs:
+            menu.setEnabled(False)
+            return menu
+
+        def current(job: SyncJob) -> str | None:
+            track = job.reference_track
+            return track.token if track is not None and track.chosen else None
+
+        picked = {current(job) for job in jobs}
+        ids = [job.id for job in jobs]
+        group = QActionGroup(menu)
+
+        def offer(
+            label: str, choice: ReferenceTrack | None, enabled: bool = True
+        ) -> None:
+            action = QAction(label, menu)
+            action.setCheckable(True)
+            action.setEnabled(enabled)
+            token = choice.token if choice is not None else None
+            action.setChecked(picked == {token})
+            action.triggered.connect(
+                lambda _=False, pick=choice: self.queue.set_reference(ids, pick)
+            )
+            group.addAction(action)
+            menu.addAction(action)
+
+        offer("Automatic", None)
+        offer("Audio", ReferenceTrack.audio(chosen=True))
+        videos = {job.reference_path for job in jobs}
+        if len(videos) != 1:
+            note = menu.addAction("Select one video's jobs to pick a track")
+            note.setEnabled(False)
+            return menu
+        tracks = self.queue.tracks_for(
+            next(iter(videos)), jobs[0].options.environment.ffmpeg_path
+        )
+        if not tracks:
+            note = menu.addAction("No subtitle tracks found")
+            note.setEnabled(False)
+            return menu
+        menu.addSeparator()
+        for track in tracks:
+            if track.codec in IMAGE_CODECS and track.codec != PGS_CODEC:
+                continue  # VobSub and friends: nothing any engine can read.
+            choice = reference.from_track(track, chosen=True)
+            details = [choice.describe()]
+            if track.forced:
+                details.append("forced")
+            if track.default:
+                details.append("default")
+            offer(
+                f"s:{track.index}  {', '.join(details)}",
+                choice,
+                all(reference.usable(track, job.options.engine) for job in jobs),
+            )
+        return menu
 
     @Slot()
     def _open_containing_folder(self) -> None:

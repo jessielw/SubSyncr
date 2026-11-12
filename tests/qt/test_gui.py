@@ -17,8 +17,16 @@ from PySide6.QtWidgets import QApplication, QMenu, QToolBar, QWidget
 import pytest
 
 from subsyncr.core.config import Theme
+from subsyncr.core.embedded import Track
 from subsyncr.core.engines import EngineId
-from subsyncr.core.models import JobStatus, SyncJob, SyncOptions, SyncResult
+from subsyncr.core.models import (
+    JobStatus,
+    ReferenceKind,
+    ReferenceTrack,
+    SyncJob,
+    SyncOptions,
+    SyncResult,
+)
 from subsyncr.core.queue import SyncQueue
 from subsyncr.qt.add_job import AddJobDialog
 from subsyncr.qt.main_window import MainWindow
@@ -31,6 +39,7 @@ from subsyncr.qt.queue_view import (
     COLUMN_RUN,
     COLUMN_STATUS,
     COLUMN_SUBTITLE,
+    COLUMN_TRACK,
     ROLE_PROGRESS,
     JobTableModel,
 )
@@ -797,3 +806,62 @@ def test_match_summary_flags_pairings_the_engine_cannot_run(
     with_fallback.engine.set_engine(EngineId.AUTOSUBSYNC)
     assert len(with_fallback.jobs()) == 1
     assert "1 will use a fallback" in with_fallback.summary.text()
+
+
+def test_track_column_names_what_the_job_aligns_against(
+    window: MainWindow, make_job: Callable[..., SyncJob]
+) -> None:
+    job = make_job("Show.S01E01")
+    job.reference_track = ReferenceTrack(ReferenceKind.PGS, 2, "eng")
+    window.queue.add([job])
+    model = window.model
+    assert model.data(model.index(0, COLUMN_TRACK)) == "PGS · eng"
+    tip = str(model.data(model.index(0, COLUMN_TRACK), Qt.ItemDataRole.ToolTipRole))
+    assert "s:2" in tip
+    assert "automatically" in tip
+
+    # alass cannot read PGS, so the column says what it will really use.
+    job.options.engine = EngineId.ALASS
+    assert model.data(model.index(0, COLUMN_TRACK)) == "Audio"
+
+
+def test_sync_against_menu_overrides_the_track(
+    window: MainWindow,
+    make_job: Callable[..., SyncJob],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracks = [
+        Track(index=0, codec="hdmv_pgs_subtitle", language="eng", title="Signs"),
+        Track(index=1, codec="hdmv_pgs_subtitle", language="eng"),
+    ]
+    monkeypatch.setattr(window.queue, "tracks_for", lambda *_: tracks)
+    job = make_job("Show.S01E01")
+    job.status = JobStatus.FAILED
+    window.queue.add([job])
+    window.table.selectRow(0)
+
+    parent = QMenu()
+    menu = window._reference_menu(parent)
+    labels = [action.text() for action in menu.actions() if action.text()]
+    assert labels[:2] == ["Automatic", "Audio"]
+    assert any(label.startswith("s:1") for label in labels)
+
+    pick = next(a for a in menu.actions() if a.text().startswith("s:1"))
+    pick.trigger()
+    assert job.reference_track == ReferenceTrack(
+        ReferenceKind.PGS, 1, "eng", "", chosen=True
+    )
+    # Choosing a new reference for a failed job is a request to run it again.
+    assert job.status is JobStatus.QUEUED
+    assert window.model.data(window.model.index(0, COLUMN_TRACK)) == "PGS · eng"
+
+
+def test_sync_against_is_disabled_for_finished_work(
+    window: MainWindow, make_job: Callable[..., SyncJob]
+) -> None:
+    job = make_job("Show.S01E01")
+    job.status = JobStatus.SUCCEEDED
+    window.queue.add([job])
+    window.table.selectRow(0)
+    parent = QMenu()
+    assert not window._reference_menu(parent).isEnabled()

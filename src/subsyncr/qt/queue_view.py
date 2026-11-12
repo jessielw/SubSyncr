@@ -23,10 +23,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from subsyncr.core import engines
+from subsyncr.core import engines, reference
 from subsyncr.core.engines import EngineId
 from subsyncr.core.models import JobStatus, SyncJob
 from subsyncr.core.queue import SyncQueue
+from subsyncr.core.scanner import needs_ffmpeg
 from subsyncr.qt.icons import STATUS_ICONS
 from subsyncr.qt.palette import status_color
 from subsyncr.qt.theme import ThemeManager
@@ -54,11 +55,46 @@ _PROGRESS_TEXT_PADDING = 8
 COLUMN_RUN = 0
 COLUMN_STATUS = 1
 COLUMN_REFERENCE = 2
-COLUMN_SUBTITLE = 3
-COLUMN_LANGUAGE = 4
-COLUMN_ENGINE = 5
-COLUMN_PROGRESS = 6
-COLUMN_RESULT = 7
+COLUMN_TRACK = 3
+COLUMN_SUBTITLE = 4
+COLUMN_LANGUAGE = 5
+COLUMN_ENGINE = 6
+COLUMN_PROGRESS = 7
+COLUMN_RESULT = 8
+
+
+def track_text(job: SyncJob) -> str:
+    """What the job aligns against, in a few words."""
+    if not needs_ffmpeg(job.reference_path):
+        return "File"  # The reference is already a subtitle or speech array.
+    engine = job.options.engine
+    if engine is EngineId.LAPSE:
+        return "lapse decides"
+    if job.reference_track is None:
+        stream = job.options.ffsubsync.pgs_ref_stream.strip()
+        if stream and stream != "auto" and not job.options.extract_embedded:
+            return f"PGS · {stream}"  # A specifier passed through untouched.
+        return "Probing..." if job.status is JobStatus.QUEUED else "Automatic"
+    return reference.effective(job.reference_track, engine).describe()
+
+
+def _track_tooltip(job: SyncJob) -> str:
+    if not needs_ffmpeg(job.reference_path):
+        return "The reference is a subtitle or speech file, so it is used as is."
+    if job.options.engine is EngineId.LAPSE:
+        return "lapse searches the video's subtitle tracks itself."
+    track = job.reference_track
+    if track is None:
+        return "The video's tracks have not been read yet."
+    lines: list[str] = []
+    if track.index is not None:
+        lines.append(f"Stream s:{track.index}")
+    shown = reference.effective(track, job.options.engine)
+    if shown != track:
+        lines.append(f"{track.describe()} needs ffsubsync; this engine uses the audio")
+    lines.append("Chosen by you" if track.chosen else "Picked automatically")
+    lines.append("Right-click to change it.")
+    return "\n".join(lines)
 
 
 def _engine_for(job: SyncJob) -> EngineId:
@@ -75,6 +111,7 @@ class JobTableModel(QAbstractTableModel):
         "Run",
         "Status",
         "Reference",
+        "Track",
         "Subtitle",
         "Language",
         "Engine",
@@ -199,6 +236,8 @@ class JobTableModel(QAbstractTableModel):
                 return _STATUS_LABELS.get(job.status, job.status.value)
             case _ if column == COLUMN_REFERENCE:
                 return job.reference_path.name
+            case _ if column == COLUMN_TRACK:
+                return track_text(job)
             case _ if column == COLUMN_SUBTITLE:
                 return job.subtitle_path.name
             case _ if column == COLUMN_LANGUAGE:
@@ -224,6 +263,8 @@ class JobTableModel(QAbstractTableModel):
         match column:
             case _ if column == COLUMN_REFERENCE:
                 return str(job.reference_path)
+            case _ if column == COLUMN_TRACK:
+                return _track_tooltip(job)
             case _ if column == COLUMN_SUBTITLE:
                 return str(job.subtitle_path)
             case _ if column == COLUMN_ENGINE:
@@ -363,6 +404,7 @@ class JobTableView(QTableView):
         for column in (
             COLUMN_RUN,
             COLUMN_STATUS,
+            COLUMN_TRACK,
             COLUMN_LANGUAGE,
             COLUMN_ENGINE,
             COLUMN_PROGRESS,
