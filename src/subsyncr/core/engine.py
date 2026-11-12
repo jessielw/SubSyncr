@@ -164,6 +164,11 @@ def build_spec(
         "options": first.options.to_dict(),
         "serialize_speech": serialize_speech,
         "speech_output": str(speech_output) if speech_output else None,
+        # Every job in a group shares this; see queue._batch_key. None leaves
+        # the choice to the worker's own rules.
+        "reference_track": (
+            first.reference_track.to_dict() if first.reference_track else None
+        ),
         "items": [
             {
                 "id": job.id,

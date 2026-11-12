@@ -614,6 +614,84 @@ class MatchResult:
         return self.subtitle is not None
 
 
+class ReferenceKind(StrEnum):
+    """What part of a video reference a job aligns against."""
+
+    AUDIO = "audio"
+    # An image subtitle track's display timings (ffsubsync --pgs-ref-stream).
+    PGS = "pgs"
+    # A text subtitle track, extracted and used in place of the video.
+    TEXT = "text"
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceTrack:
+    """The exact source a job syncs against, settled before it runs.
+
+    Resolving "auto" when the job is queued rather than inside the worker means
+    the queue can show it, the user can change it, and the speech cache is
+    keyed by the track actually used rather than by the word "auto".
+    """
+
+    kind: ReferenceKind
+    # Position among the container's subtitle streams (ffmpeg's 0:s:N).
+    index: int | None = None
+    language: str = ""
+    title: str = ""
+    # Picked by the user rather than by the automatic rules.
+    chosen: bool = False
+
+    @classmethod
+    def audio(cls, *, chosen: bool = False) -> Self:
+        return cls(ReferenceKind.AUDIO, chosen=chosen)
+
+    @property
+    def token(self) -> str:
+        """Identity for grouping and caching: kind and stream, nothing cosmetic."""
+        if self.kind is ReferenceKind.AUDIO or self.index is None:
+            return ReferenceKind.AUDIO.value
+        return f"{self.kind.value}:{self.index}"
+
+    def describe(self) -> str:
+        """Short label for a table cell, e.g. "PGS · eng · Signs & Songs"."""
+        if self.kind is ReferenceKind.AUDIO:
+            return "Audio"
+        parts = ["PGS" if self.kind is ReferenceKind.PGS else "Text"]
+        parts.extend(part for part in (self.language, self.title) if part)
+        if len(parts) == 1:
+            parts.append(f"s:{self.index}")
+        return " · ".join(parts)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind.value,
+            "index": self.index,
+            "language": self.language,
+            "title": self.title,
+            "chosen": self.chosen,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self | None:
+        if not isinstance(value, Mapping):
+            return None
+        try:
+            kind = ReferenceKind(str(value.get("kind")))
+        except ValueError:
+            return None
+        raw_index = value.get("index")
+        index = raw_index if isinstance(raw_index, int) and raw_index >= 0 else None
+        if kind is not ReferenceKind.AUDIO and index is None:
+            return None
+        return cls(
+            kind=kind,
+            index=index if kind is not ReferenceKind.AUDIO else None,
+            language=_as_str(value.get("language"), ""),
+            title=_as_str(value.get("title"), ""),
+            chosen=_as_bool(value.get("chosen"), False),
+        )
+
+
 @dataclass(slots=True)
 class SyncJob:
     reference_path: Path
@@ -632,6 +710,8 @@ class SyncJob:
     # serialize its speech array and the rest reuse it. See core.speech_cache.
     group_key: str | None = None
     created_at: float = field(default_factory=time.time)
+    # None until the queue has probed the reference; see core.reference.
+    reference_track: ReferenceTrack | None = None
 
     @property
     def effective_output(self) -> Path:
@@ -662,6 +742,9 @@ class SyncJob:
             "language": self.language,
             "group_key": self.group_key,
             "created_at": self.created_at,
+            "reference_track": (
+                self.reference_track.to_dict() if self.reference_track else None
+            ),
         }
 
     @classmethod
@@ -702,6 +785,7 @@ class SyncJob:
                     else None
                 ),
                 created_at=_as_float(value.get("created_at"), time.time()),
+                reference_track=ReferenceTrack.from_dict(value.get("reference_track")),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("Invalid queue job record") from exc

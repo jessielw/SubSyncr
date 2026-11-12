@@ -259,14 +259,19 @@ def reference_from(
     chosen = choose(probe_tracks(video, ffmpeg_path), prefer_language)
     if chosen is None:
         return None
+    return extract_to(video, chosen, workdir, ffmpeg_path), chosen
+
+
+def extract_to(video: Path, track: Track, workdir: Path, ffmpeg_path: str = "") -> Path:
+    """Extract one track into a fresh file in ``workdir``. Returns its path."""
     handle, name = tempfile.mkstemp(
         dir=str(workdir), prefix=".embedded-", suffix=_EXTRACT_SUFFIX
     )
     os.close(handle)
     destination = Path(name)
     try:
-        extract(video, chosen, destination, ffmpeg_path)
+        extract(video, track, destination, ffmpeg_path)
     except ExtractionError:
         destination.unlink(missing_ok=True)
         raise
-    return destination, chosen
+    return destination

@@ -16,9 +16,15 @@ import time
 from typing import Any
 
 from subsyncr.core.engines import EngineId
-from subsyncr.core.models import JobStatus, SyncJob, SyncOptions, SyncResult
+from subsyncr.core.models import (
+    JobStatus,
+    ReferenceTrack,
+    SyncJob,
+    SyncOptions,
+    SyncResult,
+)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -34,7 +40,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     language        TEXT,
     group_key       TEXT,
     last_error      TEXT    NOT NULL DEFAULT '',
-    created_at      REAL    NOT NULL
+    created_at      REAL    NOT NULL,
+    reference_track TEXT
 );
 
 CREATE TABLE IF NOT EXISTS history (
@@ -124,6 +131,13 @@ class JobStore:
                         f"ALTER TABLE {table} ADD COLUMN engine TEXT NOT NULL"
                         " DEFAULT 'ffsubsync'"
                     )
+        if version < 3:
+            # The track each job aligns against, as JSON. NULL means not yet
+            # probed, which is what every job saved before this was.
+            with contextlib.suppress(sqlite3.OperationalError):
+                self._connection.execute(
+                    "ALTER TABLE jobs ADD COLUMN reference_track TEXT"
+                )
         self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     def close(self) -> None:
@@ -162,6 +176,11 @@ class JobStore:
                 job.group_key,
                 job.last_error,
                 job.created_at,
+                (
+                    json.dumps(job.reference_track.to_dict(), sort_keys=True)
+                    if job.reference_track is not None
+                    else None
+                ),
             )
             for index, job in enumerate(jobs)
             if job.status is not JobStatus.SUCCEEDED
@@ -171,8 +190,8 @@ class JobStore:
             self._connection.executemany(
                 "INSERT INTO jobs (id, position, enabled, status, reference_path,"
                 " subtitle_path, output_path, options, engine, language, group_key,"
-                " last_error, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " last_error, created_at, reference_track)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 payload,
             )
             self._connection.commit()
@@ -292,7 +311,18 @@ def _job_from_row(row: sqlite3.Row) -> SyncJob:
         ),
         stage="Interrupted" if interrupted else "Waiting",
         created_at=float(row["created_at"]),
+        reference_track=_reference_track(row),
     )
+
+
+def _reference_track(row: sqlite3.Row) -> ReferenceTrack | None:
+    raw = row["reference_track"]
+    if not raw:
+        return None
+    try:
+        return ReferenceTrack.from_dict(json.loads(str(raw)))
+    except json.JSONDecodeError:
+        return None  # Re-probed on load; not worth losing the job over.
 
 
 def _history_from_row(row: sqlite3.Row) -> HistoryEntry:

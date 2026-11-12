@@ -18,14 +18,21 @@ from subsyncr.core.models import FFSubSyncOptions
 from subsyncr.core.scanner import needs_ffmpeg
 
 
-def _fingerprint(reference: Path, options: FFSubSyncOptions) -> str:
-    """Stable id for "this file, extracted these settings"."""
+def _fingerprint(reference: Path, options: FFSubSyncOptions, source: str = "") -> str:
+    """Stable id for "this file, extracted these settings, from this stream".
+
+    ``source`` names the track the array came from ("pgs:2", "audio"). Empty
+    keeps the original fingerprint, so arrays cached before it existed are
+    still found for jobs that never resolved a track.
+    """
     try:
         stat = reference.stat()
         identity = f"{reference.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
     except OSError:
         identity = str(reference)
     parts = "|".join(str(part) for part in options.speech_cache_key())
+    if source:
+        parts = f"{parts}|source={source}"
     return hashlib.sha256(f"{identity}|{parts}".encode()).hexdigest()[:32]
 
 
@@ -45,14 +52,18 @@ class SpeechCache:
         with self._guard:
             return self._producing.setdefault(key, threading.Lock())
 
-    def cached_path(self, reference: Path, options: FFSubSyncOptions) -> Path:
-        return self.directory / f"{_fingerprint(reference, options)}.npz"
+    def cached_path(
+        self, reference: Path, options: FFSubSyncOptions, source: str = ""
+    ) -> Path:
+        return self.directory / f"{_fingerprint(reference, options, source)}.npz"
 
-    def lookup(self, reference: Path, options: FFSubSyncOptions) -> Path | None:
+    def lookup(
+        self, reference: Path, options: FFSubSyncOptions, source: str = ""
+    ) -> Path | None:
         """An existing speech array for this reference, if we have one."""
         if not self.enabled or not needs_ffmpeg(reference):
             return None
-        candidate = self.cached_path(reference, options)
+        candidate = self.cached_path(reference, options, source)
         return candidate if candidate.is_file() else None
 
     def stage(self) -> Path:
@@ -80,14 +91,18 @@ class SpeechCache:
                 lock.release()
 
     def harvest(
-        self, reference: Path, options: FFSubSyncOptions, staged: Path
+        self,
+        reference: Path,
+        options: FFSubSyncOptions,
+        staged: Path,
+        source: str = "",
     ) -> Path | None:
         """Publish only the staging file issued for this extraction."""
         with self._guard:
             if staged not in self._staged:
                 raise ValueError("Speech staging file is not owned by this cache")
             self._staged.remove(staged)
-        destination = self.cached_path(reference, options)
+        destination = self.cached_path(reference, options, source)
         try:
             if not staged.is_file() or staged.stat().st_size == 0:
                 return None

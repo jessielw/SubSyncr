@@ -48,6 +48,7 @@ from typing import Any, TextIO
 
 from subsyncr.core import engines, logger
 from subsyncr.core.engines import EngineId
+from subsyncr.core.models import ReferenceKind, ReferenceTrack
 from subsyncr.core.spawn import ConsoleGuard
 
 
@@ -203,6 +204,10 @@ def use_embedded_reference(
         return None  # Already a subtitle or a cached speech array.
 
     environment: dict[str, Any] = options.get("environment") or {}
+    resolved = ReferenceTrack.from_dict(spec.get("reference_track"))
+    if resolved is not None:
+        return _extract_resolved(spec, channel, workdir, reference, resolved)
+
     items: list[dict[str, Any]] = list(spec.get("items") or [])
     language = str(items[0].get("language", "")) if items else ""
     try:
@@ -241,6 +246,50 @@ def use_embedded_reference(
     return extracted
 
 
+def _extract_resolved(
+    spec: dict[str, Any],
+    channel: EventChannel,
+    workdir: Path,
+    reference: Path,
+    resolved: ReferenceTrack,
+) -> Path | None:
+    """Extract the one text track the queue settled on, or nothing."""
+    from subsyncr.core import embedded
+
+    if resolved.kind is not ReferenceKind.TEXT or resolved.index is None:
+        return None
+    options: dict[str, Any] = spec.get("options") or {}
+    environment: dict[str, Any] = options.get("environment") or {}
+    track = embedded.Track(
+        index=resolved.index,
+        codec="",
+        language=resolved.language,
+        title=resolved.title,
+    )
+    try:
+        extracted = embedded.extract_to(
+            reference, track, workdir, str(environment.get("ffmpeg_path", ""))
+        )
+    except embedded.ExtractionError as exc:
+        channel.emit(
+            "log",
+            job_id=None,
+            level="WARNING",
+            message=f"could not extract subtitle track s:{resolved.index} ({exc});"
+            " using the audio",
+        )
+        return None
+    channel.emit(
+        "log",
+        job_id=None,
+        level="INFO",
+        message=f"aligning against the embedded {resolved.describe()} subtitle"
+        f" (s:{resolved.index}) instead of the audio",
+    )
+    spec["reference"] = str(extracted)
+    return extracted
+
+
 def use_pgs_reference(spec: dict[str, Any], channel: EventChannel) -> None:
     """Resolve ffsubsync's "auto" PGS track, or fall back to the audio.
 
@@ -254,11 +303,31 @@ def use_pgs_reference(spec: dict[str, Any], channel: EventChannel) -> None:
         return
     options: dict[str, Any] = spec.get("options") or {}
     tuning: dict[str, Any] = options.get("ffsubsync") or {}
-    if str(tuning.get("pgs_ref_stream", "")).strip() != "auto":
-        return
 
     from subsyncr.core import embedded
     from subsyncr.core.scanner import needs_ffmpeg
+
+    resolved = ReferenceTrack.from_dict(spec.get("reference_track"))
+    if resolved is not None:
+        # The queue already decided; the settings' "auto" no longer applies.
+        if not needs_ffmpeg(Path(str(spec["reference"]))):
+            return  # Extracted text or cached speech; build_arguments skips PGS.
+        if resolved.kind is ReferenceKind.PGS and resolved.index is not None:
+            tuning["pgs_ref_stream"] = f"s:{resolved.index}"
+            channel.emit(
+                "log",
+                job_id=None,
+                level="INFO",
+                message=f"aligning against the {resolved.describe()} PGS"
+                f" subtitle track (s:{resolved.index})",
+            )
+        else:
+            # Audio, or a text track that failed to extract.
+            tuning["pgs_ref_stream"] = ""
+        return
+
+    if str(tuning.get("pgs_ref_stream", "")).strip() != "auto":
+        return
 
     if not needs_ffmpeg(Path(str(spec["reference"]))):
         return  # An extracted text track already won; build_arguments skips it.

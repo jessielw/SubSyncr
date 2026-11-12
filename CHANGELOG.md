@@ -4,6 +4,10 @@
 
 - Skip Signs & Songs and forced-titled PGS tracks when choosing the reference
   automatically, even when the release leaves them unflagged or makes them default.
+- Settle each job's reference track (audio, PGS, or extracted text) when it is
+  queued rather than mid-run, so the speech cache is keyed by the track actually
+  used. A retry no longer reuses timings cached from the wrong track, and arrays
+  built from an extracted subtitle are no longer mixed up with audio ones.
 
 ## [0.1.0] - 2026-10-01
 

@@ -18,8 +18,9 @@ import logging
 from pathlib import Path
 import threading
 
-from subsyncr.core import logger
+from subsyncr.core import logger, reference
 from subsyncr.core.config import AppConfig
+from subsyncr.core.embedded import Track
 from subsyncr.core.engine import (
     EngineError,
     SyncProcess,
@@ -28,7 +29,7 @@ from subsyncr.core.engine import (
     validate,
 )
 from subsyncr.core.engines import EngineId
-from subsyncr.core.models import JobStatus, SyncJob, SyncResult
+from subsyncr.core.models import JobStatus, ReferenceTrack, SyncJob, SyncResult
 from subsyncr.core.output import same_path
 from subsyncr.core.scanner import needs_ffmpeg
 from subsyncr.core.speech_cache import SpeechCache
@@ -93,7 +94,19 @@ def _batch_key(job: SyncJob) -> str:
     # Only the settings this run actually uses; an idle engine's options must
     # not split a group.
     options = json.dumps(job.options.identity(), sort_keys=True)
-    return f"{job.group_key}|{job.reference_path}|{options}"
+    # Two subtitles on one video can want different tracks (one per language),
+    # and those are different extractions.
+    track = job.reference_track.token if job.reference_track else ""
+    return f"{job.group_key}|{job.reference_path}|{options}|{track}"
+
+
+def _cache_source(job: SyncJob) -> str:
+    """What, beyond the speech options, the cached array was built from."""
+    if job.reference_track is not None:
+        return job.reference_track.token
+    # Unresolved: the worker's own rules decide, and extraction changes the
+    # array entirely, so at least keep the two apart.
+    return "embedded" if job.options.extract_embedded else ""
 
 
 def _log_outcome(job: SyncJob) -> None:
@@ -156,6 +169,15 @@ class SyncQueue:
         self._active_count = 0
         self._draining = False
         self._shutdown = False
+        # Reference tracks are settled before a job can be claimed. One
+        # resolver at a time, so a video is never probed twice concurrently.
+        self._probe = reference.TrackProbe()
+        self._resolve_lock = threading.Lock()
+        # Jobs whose PGS setting is an ffmpeg specifier we cannot map; the
+        # worker hands those to ffsubsync as they are.
+        self._unresolvable: set[str] = set()
+        if self._jobs:
+            self._resolve_in_background()
 
     # -- inspection ------------------------------------------------------
 
@@ -202,6 +224,12 @@ class SyncQueue:
                         counts.skipped += 1
         return counts
 
+    def tracks_for(self, video: Path, ffmpeg_path: str = "") -> list[Track]:
+        """Every subtitle track in a reference, probing it if need be."""
+        if not needs_ffmpeg(video):
+            return []
+        return self._probe.tracks(video, ffmpeg_path)
+
     def pending_groups(self) -> int:
         """How many distinct worker processes the remaining work needs."""
         with self._lock:
@@ -217,9 +245,45 @@ class SyncQueue:
             self._jobs.extend(additions)
             self._persist()
         self._notify_queue_changed()
+        self._resolve_in_background()
         if self._draining:
             self._ensure_workers()
         return len(additions)
+
+    def set_reference(
+        self, job_ids: Iterable[str], track: ReferenceTrack | None
+    ) -> int:
+        """Pin what these jobs align against; None goes back to automatic.
+
+        A failed, cancelled or low-quality job is queued again, since a new
+        reference only means anything if it runs again. Running and succeeded
+        jobs are left alone: one is mid-flight, the other is final.
+        """
+        wanted = set(job_ids)
+        changed: list[SyncJob] = []
+        with self._lock:
+            for job in self._jobs:
+                if job.id not in wanted or job.status in (
+                    JobStatus.RUNNING,
+                    JobStatus.SUCCEEDED,
+                ):
+                    continue
+                job.reference_track = track
+                self._unresolvable.discard(job.id)
+                if job.status.is_retryable:
+                    job.reset_for_retry()
+                changed.append(job)
+            if changed:
+                self._persist()
+        for job in changed:
+            self._emit_job_changed(job)
+        if changed:
+            self._notify_queue_changed()
+            if track is None:
+                self._resolve_in_background()
+            if self._draining:
+                self._ensure_workers()
+        return len(changed)
 
     def remove(self, job_ids: Iterable[str]) -> int:
         wanted = set(job_ids)
@@ -347,12 +411,66 @@ class SyncQueue:
             job for job in self._jobs if job.enabled and job.status is JobStatus.QUEUED
         ]
 
+    def _needs_resolving(self, job: SyncJob) -> bool:
+        return (
+            job.reference_track is None
+            and job.status is JobStatus.QUEUED
+            and job.id not in self._unresolvable
+            and needs_ffmpeg(job.reference_path)
+        )
+
+    def _resolve_pending(self) -> None:
+        """Settle every queued job's reference track that is still open.
+
+        Probing happens outside the queue lock - it is a subprocess - and the
+        answer is only written back if nobody chose a track in the meantime.
+        """
+        changed: list[SyncJob] = []
+        with self._resolve_lock:
+            with self._lock:
+                todo = [job for job in self._jobs if self._needs_resolving(job)]
+            for job in todo:
+                tracks = self._probe.tracks(
+                    job.reference_path, job.options.environment.ffmpeg_path
+                )
+                choice = reference.choose(tracks, job.options, job.language)
+                with self._lock:
+                    if not self._needs_resolving(job):
+                        continue
+                    if choice is None:
+                        self._unresolvable.add(job.id)
+                        continue
+                    job.reference_track = choice
+                    changed.append(job)
+            if changed:
+                with self._lock:
+                    self._persist()
+        for job in changed:
+            self._emit_job_changed(job)
+
+    def _resolve_in_background(self) -> None:
+        def run() -> None:
+            try:
+                self._resolve_pending()
+            except Exception:
+                _log.exception("could not probe reference tracks")
+            # A worker that found only unresolved jobs will have exited.
+            with self._lock:
+                draining = self._draining and not self._shutdown
+            if draining:
+                self._ensure_workers()
+
+        threading.Thread(target=run, name="subsyncr-probe", daemon=True).start()
+
     def _claim_group(self) -> list[SyncJob]:
         """Take every runnable job that shares the next group's key."""
         with self._lock:
             if not self._draining or self._shutdown:
                 return []
-            runnable = self._runnable()
+            # A job whose track is still being probed is not ready to group.
+            runnable = [
+                job for job in self._runnable() if not self._needs_resolving(job)
+            ]
             if not runnable:
                 return []
             key = _batch_key(runnable[0])
@@ -373,6 +491,7 @@ class SyncQueue:
 
     def _worker_loop(self) -> None:
         while True:
+            self._resolve_pending()
             group = self._claim_group()
             if not group:
                 break
@@ -533,16 +652,19 @@ class SyncQueue:
             and engine is EngineId.FFSUBSYNC
             and needs_ffmpeg(first.reference_path)
         )
+        source = _cache_source(first)
         if caches_speech:
             speech_options = first.options.ffsubsync
-            hit = self._cache.lookup(first.reference_path, speech_options)
+            hit = self._cache.lookup(first.reference_path, speech_options, source)
             if hit is not None:
                 reference_override = hit
                 used_cache = True
             else:
                 # One producer per cache key; each owns a distinct staging file.
                 producer_key = str(
-                    self._cache.cached_path(first.reference_path, speech_options)
+                    self._cache.cached_path(
+                        first.reference_path, speech_options, source
+                    )
                 )
                 serialize = self._cache.claim_producer(producer_key)
                 if serialize:
@@ -589,7 +711,10 @@ class SyncQueue:
                 # Even failure cleanup can touch only our own staging file.
                 with contextlib.suppress(Exception):
                     self._cache.harvest(
-                        first.reference_path, first.options.ffsubsync, speech_output
+                        first.reference_path,
+                        first.options.ffsubsync,
+                        speech_output,
+                        source,
                     )
                 self._cache.release_producer(producer_key)
 
