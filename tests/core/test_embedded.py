@@ -116,6 +116,27 @@ def test_pgs_choice_skips_text_and_forced_tracks() -> None:
     assert chosen.index == 2
 
 
+def test_a_default_signs_track_loses_to_a_full_one() -> None:
+    """Dual-audio remuxes often make an unflagged Signs & Songs track default."""
+    tracks = [
+        _track(index=0, codec="hdmv_pgs_subtitle", title="Signs & Songs", default=True),
+        _track(
+            index=1, codec="hdmv_pgs_subtitle", language="spa", title="Signs & Songs"
+        ),
+        _track(index=2, codec="hdmv_pgs_subtitle"),
+        _track(index=3, codec="hdmv_pgs_subtitle", language="spa"),
+    ]
+    chosen = embedded.choose_pgs(tracks, prefer_language="en")
+    assert chosen is not None
+    assert chosen.index == 2
+
+
+def test_a_full_track_mentioning_signs_is_not_partial() -> None:
+    assert not _track(title="Full Subtitles (Signs & Songs included)").is_partial
+    assert _track(title="Forced").is_partial
+    assert not _track(title="English").is_partial
+
+
 def test_no_pgs_track_means_no_pgs_choice() -> None:
     tracks = [_track(index=0, codec="subrip"), _track(index=1, codec="dvd_subtitle")]
     assert embedded.choose_pgs(tracks) is None

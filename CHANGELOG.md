@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+- Skip Signs & Songs and forced-titled PGS tracks when choosing the reference
+  automatically, even when the release leaves them unflagged or makes them default.
+
 ## [0.1.0] - 2026-10-01
 
 First public release of SubSyncr.

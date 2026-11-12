@@ -23,6 +23,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
@@ -41,6 +42,12 @@ PGS_CODEC = "hdmv_pgs_subtitle"
 _EXTRACT_SUFFIX = ".srt"
 
 _log = logging.getLogger(__name__)
+
+# Titles that mark a track covering only part of the dialogue. Many releases
+# never set the forced flag on these, and some make them the default track.
+_PARTIAL_TITLE = re.compile(r"\b(forced|signs?|songs?)\b", re.IGNORECASE)
+# "Full Subtitles (Signs & Songs included)" is a complete track.
+_FULL_TITLE = re.compile(r"\b(full|dialogue)\b", re.IGNORECASE)
 
 _TIMEOUT = 120.0
 
@@ -65,6 +72,15 @@ class Track:
     @property
     def is_text(self) -> bool:
         return self.codec not in IMAGE_CODECS
+
+    @property
+    def is_partial(self) -> bool:
+        """Forced, or titled like a signs-and-songs track."""
+        if self.forced:
+            return True
+        return bool(_PARTIAL_TITLE.search(self.title)) and not _FULL_TITLE.search(
+            self.title
+        )
 
 
 def probe_tracks(video: Path, ffmpeg_path: str = "") -> list[Track]:
@@ -173,7 +189,7 @@ def _best(tracks: list[Track], prefer_language: str | None) -> Track | None:
         )
         return (
             language_match,
-            0 if track.forced else 1,
+            0 if track.is_partial else 1,
             1 if track.default else 0,
             track.frames,
         )
