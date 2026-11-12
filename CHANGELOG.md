@@ -11,6 +11,8 @@
 - Show each job's reference track in a new Track column, and change it from the
   queue's right-click menu (Sync against: Automatic, Audio, or any track in the
   video). Picking a track for a failed job queues it again.
+- Open file and folder dialogs in the folder last dropped on the window or browsed
+  to, remembered across restarts. A field that already names a path still wins.
 
 ## [0.1.0] - 2026-10-01
 

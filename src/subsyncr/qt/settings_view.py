@@ -589,6 +589,7 @@ class SettingsDialog(QDialog):
         self.ffmpeg_field = PathField(
             caption="Select the folder containing ffmpeg",
             on_change=self._update_ffmpeg_status,
+            remember=False,
             parent=page,
         )
         self.ffmpeg_field.set_text(options.environment.ffmpeg_path)

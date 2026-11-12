@@ -31,6 +31,7 @@ from subsyncr.core.scanner import (
     SUBTITLE_EXTENSIONS,
     SUBTITLE_REFERENCE_EXTENSIONS,
 )
+from subsyncr.qt import recent
 from subsyncr.qt.icons import Icon
 from subsyncr.qt.palette import alternate_base, ok_color, warn_color
 from subsyncr.qt.sizing import INLINE_ICON_SIZE
@@ -72,11 +73,15 @@ class PathField(QWidget):
         file_filter: str | None = None,
         caption: str = "",
         on_change: Callable[[], None] | None = None,
+        remember: bool = True,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         # No filter means this field names a directory.
         self._filter = file_filter
+        # Off for fields that point at tools rather than media, so browsing to
+        # ffmpeg does not send the next video picker into its bin folder.
+        self._remember = remember
         self._caption = caption or (
             "Select file" if file_filter is not None else "Select folder"
         )
@@ -105,16 +110,17 @@ class PathField(QWidget):
 
     @Slot()
     def _browse(self) -> None:
+        start = recent.start_for(self.text()) if self._remember else self.text()
         if self._filter is None:
-            selected = QFileDialog.getExistingDirectory(
-                self, self._caption, self.text()
-            )
+            selected = QFileDialog.getExistingDirectory(self, self._caption, start)
         else:
             selected, _ = QFileDialog.getOpenFileName(
-                self, self._caption, self.text(), self._filter
+                self, self._caption, start, self._filter
             )
         if selected:
             self.set_text(selected)
+            if self._remember:
+                recent.remember(selected)
 
 
 class EngineCombo(QComboBox):

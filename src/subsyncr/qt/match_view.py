@@ -39,6 +39,7 @@ from subsyncr.core.matcher import DEFAULT_THRESHOLD, propose_matches
 from subsyncr.core.models import MatchMethod, SyncJob, SyncOptions
 from subsyncr.core.planner import build_job, group_key_for
 from subsyncr.core.scanner import scan_references, scan_subtitles
+from subsyncr.qt import recent
 from subsyncr.qt.icons import Icon
 from subsyncr.qt.palette import ambiguous_color, unmatched_color
 from subsyncr.qt.sizing import SIZE_MATCH, SPACING
@@ -386,6 +387,7 @@ class BatchMatchDialog(QDialog):
         )
         if not selected:
             return
+        recent.remember(selected)
         chosen = Path(selected)
         row.subtitle = chosen
         row.language = parse_subtitle_tags(chosen).label or None

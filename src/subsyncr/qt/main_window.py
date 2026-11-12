@@ -47,6 +47,7 @@ from subsyncr.core.queue import QueueCounts, SyncQueue
 from subsyncr.core.scanner import MEDIA_EXTENSIONS, SUBTITLE_EXTENSIONS, needs_ffmpeg
 from subsyncr.core.speech_cache import SpeechCache
 from subsyncr.core.store import JobStore
+from subsyncr.qt import recent
 from subsyncr.qt.add_job import AddJobDialog
 from subsyncr.qt.bridge import QueueBridge
 from subsyncr.qt.history_view import HistoryDialog
@@ -80,6 +81,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__(parent)
         self.settings = settings or QSettings()
+        recent.attach(self.settings)
         self.config = config or AppConfig.load()
         self.store = store or JobStore(database_path())
         self.cache = SpeechCache(
@@ -508,6 +510,8 @@ class MainWindow(QMainWindow):
         if not paths:
             return
         event.acceptProposedAction()
+        # The next browse dialog opens where these came from.
+        recent.remember(paths[0])
         # On Windows the drop arrives inside the OS drag-and-drop loop
         # (OLE's DoDragDrop), which blocks Explorer's UI thread until this
         # handler returns. Opening a modal dialog here nests a second event
