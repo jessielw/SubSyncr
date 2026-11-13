@@ -287,6 +287,8 @@ class JobTableModel(QAbstractTableModel):
                     if job.result.duration_seconds:
                         parts.append(f"took {job.result.duration_seconds:.1f}s")
                 parts.append(f"output: {job.effective_output}")
+                if _another_track_might_help(job):
+                    parts.append("Right-click → Sync against to try another track.")
                 return "\n".join(parts)
         return ""
 
@@ -315,6 +317,16 @@ class JobTableModel(QAbstractTableModel):
         job = self._jobs[index.row()]
         enabled = value in (Qt.CheckState.Checked, Qt.CheckState.Checked.value)
         return self._queue.set_enabled(job.id, enabled)
+
+
+def _another_track_might_help(job: SyncJob) -> bool:
+    """A failed alignment against a video, where the menu offers other tracks."""
+    return (
+        job.status in (JobStatus.FAILED, JobStatus.SKIPPED_LOW_QUALITY)
+        and job.result is not None
+        and needs_ffmpeg(job.reference_path)
+        and job.options.engine is not EngineId.LAPSE
+    )
 
 
 def _result_text(job: SyncJob) -> str:

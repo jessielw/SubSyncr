@@ -865,3 +865,20 @@ def test_sync_against_is_disabled_for_finished_work(
     window.table.selectRow(0)
     parent = QMenu()
     assert not window._reference_menu(parent).isEnabled()
+
+
+def test_a_failed_alignment_points_at_the_track_menu(
+    window: MainWindow, make_job: Callable[..., SyncJob]
+) -> None:
+    job = make_job("Show.S01E01")
+    job.status = JobStatus.FAILED
+    job.result = SyncResult(status=JobStatus.FAILED, error="could not align")
+    window.queue.add([job])
+    model = window.model
+    tip = str(model.data(model.index(0, COLUMN_RESULT), Qt.ItemDataRole.ToolTipRole))
+    assert "Sync against" in tip
+
+    # lapse picks its own track, so there is nothing to point at.
+    job.options.engine = EngineId.LAPSE
+    tip = str(model.data(model.index(0, COLUMN_RESULT), Qt.ItemDataRole.ToolTipRole))
+    assert "Sync against" not in tip

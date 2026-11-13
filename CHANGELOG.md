@@ -13,6 +13,8 @@
   video). Picking a track for a failed job queues it again.
 - Open file and folder dialogs in the folder last dropped on the window or browsed
   to, remembered across restarts. A field that already names a path still wins.
+- Name the track a failed ffsubsync alignment used (e.g. "against PGS · eng (s:0)"),
+  and point the Result tooltip at Sync against so another track is one click away.
 
 ## [0.1.0] - 2026-10-01
 

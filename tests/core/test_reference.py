@@ -300,3 +300,22 @@ def test_a_chosen_audio_reference_turns_pgs_off() -> None:
     channel, _ = _channel()
     use_pgs_reference(spec, channel)
     assert spec["options"]["ffsubsync"]["pgs_ref_stream"] == ""
+
+
+def test_a_message_names_the_stream_once() -> None:
+    assert (
+        ReferenceTrack(ReferenceKind.PGS, 2, "eng").with_stream() == "PGS · eng (s:2)"
+    )
+    assert ReferenceTrack(ReferenceKind.TEXT, 5).with_stream() == "Text · s:5"
+    assert ReferenceTrack.audio().with_stream() == "Audio"
+
+
+def test_a_failure_says_what_it_was_aligned_against() -> None:
+    from subsyncr.core.engines.ffsubsync import aligned_against
+
+    pgs = _spec(ReferenceTrack(ReferenceKind.PGS, 0, "eng", "Signs & Songs"), "s:0")
+    assert aligned_against(pgs) == "PGS · eng · Signs & Songs (s:0)"
+    assert aligned_against(_spec(ReferenceTrack.audio())) == "the audio"
+    # A text track that never extracted left the video as the reference.
+    assert aligned_against(_spec(ReferenceTrack(ReferenceKind.TEXT, 4))) == "the audio"
+    assert aligned_against(_spec(None)) == ""

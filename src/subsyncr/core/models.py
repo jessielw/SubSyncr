@@ -662,6 +662,14 @@ class ReferenceTrack:
             parts.append(f"s:{self.index}")
         return " · ".join(parts)
 
+    def with_stream(self) -> str:
+        """The label plus its stream, e.g. "PGS · eng (s:2)", for messages."""
+        label = self.describe()
+        stream = f"s:{self.index}"
+        if self.index is None or stream in label:
+            return label
+        return f"{label} ({stream})"
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "kind": self.kind.value,

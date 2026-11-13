@@ -25,7 +25,12 @@ import re
 import time
 from typing import Any
 
-from subsyncr.core.models import FileOptions, OutputPolicy
+from subsyncr.core.models import (
+    FileOptions,
+    OutputPolicy,
+    ReferenceKind,
+    ReferenceTrack,
+)
 from subsyncr.core.output import OutputTransaction
 from subsyncr.core.scanner import needs_ffmpeg
 from subsyncr.core.worker import CancelToken, EventChannel
@@ -158,7 +163,29 @@ def build_arguments(spec: dict[str, Any], item: dict[str, Any]) -> list[str]:
     return arguments
 
 
-def _classify(synced: bool, output: Path, scraper: _ResultScraper) -> tuple[str, str]:
+def aligned_against(spec: dict[str, Any]) -> str:
+    """What the group was aligned against, for a failure message.
+
+    Empty when the queue never resolved a track: an explicit specifier or an
+    old job, where naming a guess would mislead more than it helps.
+    """
+    track = ReferenceTrack.from_dict(spec.get("reference_track"))
+    if track is None or track.kind is ReferenceKind.AUDIO:
+        return "the audio" if track is not None else ""
+    reference = Path(str(spec.get("reference", "")))
+    if track.kind is ReferenceKind.TEXT and needs_ffmpeg(reference):
+        return "the audio"  # The text track failed to extract.
+    if track.kind is ReferenceKind.PGS:
+        tuning = (spec.get("options") or {}).get("ffsubsync") or {}
+        stream = str(tuning.get("pgs_ref_stream", "")).strip()
+        if needs_ffmpeg(reference) and not stream:
+            return "the audio"
+    return track.with_stream()
+
+
+def _classify(
+    synced: bool, output: Path, scraper: _ResultScraper, against: str = ""
+) -> tuple[str, str]:
     """Turn ffsubsync's ambiguous signals into one status and a message."""
     if scraper.low_quality_reasons:
         # ffsubsync wrote the *original* subtitles to the output path, so the
@@ -168,6 +195,8 @@ def _classify(synced: bool, output: Path, scraper: _ResultScraper) -> tuple[str,
         return "succeeded", ""
     if synced:
         return "failed", f"ffsubsync reported success but wrote no output to {output}"
+    if against:
+        return "failed", f"ffsubsync could not align these files against {against}"
     return "failed", "ffsubsync could not align these files"
 
 
@@ -213,6 +242,7 @@ def run_group(spec: dict[str, Any], channel: EventChannel, cancel: CancelToken) 
             fail_all("ffsubsync rejected these arguments")
             return 1
 
+        against = aligned_against(spec)
         last_fraction = -1.0
 
         def on_progress(info: Any) -> None:
@@ -299,7 +329,9 @@ def run_group(spec: dict[str, Any], channel: EventChannel, cancel: CancelToken) 
                     args.srtout = str(transaction.staging)
                     result: dict[str, Any] = {}
                     synced = bool(try_sync(args, reference_pipe, result))
-                    status, error = _classify(synced, transaction.staging, scraper)
+                    status, error = _classify(
+                        synced, transaction.staging, scraper, against
+                    )
                     if cancel.cancelled:
                         status, error = "cancelled", "Cancelled"
                     elif status == "succeeded":

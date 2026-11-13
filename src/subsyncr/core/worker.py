@@ -283,8 +283,8 @@ def _extract_resolved(
         "log",
         job_id=None,
         level="INFO",
-        message=f"aligning against the embedded {resolved.describe()} subtitle"
-        f" (s:{resolved.index}) instead of the audio",
+        message=f"aligning against the embedded {resolved.with_stream()} subtitle"
+        " instead of the audio",
     )
     spec["reference"] = str(extracted)
     return extracted
@@ -318,8 +318,7 @@ def use_pgs_reference(spec: dict[str, Any], channel: EventChannel) -> None:
                 "log",
                 job_id=None,
                 level="INFO",
-                message=f"aligning against the {resolved.describe()} PGS"
-                f" subtitle track (s:{resolved.index})",
+                message=f"aligning against the {resolved.with_stream()} subtitle track",
             )
         else:
             # Audio, or a text track that failed to extract.
