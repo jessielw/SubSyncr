@@ -2,6 +2,8 @@
 
 ## [0.1.1] - 2026-11-12
 
+### Changed
+
 - Skip Signs & Songs and forced-titled PGS tracks when choosing the reference
   automatically, even when the release leaves them unflagged or makes them default.
 - Settle each job's reference track (audio, PGS, or extracted text) when it is
