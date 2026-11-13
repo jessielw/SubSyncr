@@ -31,3 +31,5 @@ HANDOFF-*.md
 .env
 .env.*
 !.env.example
+
+scrap/
