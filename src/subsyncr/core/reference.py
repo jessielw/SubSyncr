@@ -99,18 +99,18 @@ class TrackProbe:
         self._lock = threading.Lock()
         self._tracks: dict[tuple[str, int, int], list[Track]] = {}
 
-    def tracks(self, video: Path, ffmpeg_path: str = "") -> list[Track]:
+    def tracks(self, video: Path, ffmpeg_path: str = "") -> list[Track] | None:
+        """The video's subtitle tracks, or None if it could not be read."""
         key = _identity(video)
         if key is None:
-            return []
+            return None  # Missing, or a share that is not mounted.
         with self._lock:
             cached = self._tracks.get(key)
         if cached is not None:
             return cached
-        found = embedded.probe_tracks(video, ffmpeg_path)
-        if found:
-            # An empty answer may be a missing ffprobe or a share that blinked;
-            # ask again next time rather than remember it.
+        found = embedded.read_tracks(video, ffmpeg_path)
+        if found is not None:
+            # A failure may be a share that blinked; ask again next time.
             with self._lock:
                 self._tracks[key] = found
         return found

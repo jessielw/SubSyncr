@@ -63,8 +63,12 @@ COLUMN_PROGRESS = 7
 COLUMN_RESULT = 8
 
 
-def track_text(job: SyncJob) -> str:
-    """What the job aligns against, in a few words."""
+def track_text(job: SyncJob, resolving: bool | None = None) -> str:
+    """What the job aligns against, in a few words.
+
+    ``resolving`` says whether the queue is still reading the video; a video
+    it could not read is left for the worker, and must not read "Probing...".
+    """
     if not needs_ffmpeg(job.reference_path):
         return "File"  # The reference is already a subtitle or speech array.
     engine = job.options.engine
@@ -74,18 +78,22 @@ def track_text(job: SyncJob) -> str:
         stream = job.options.ffsubsync.pgs_ref_stream.strip()
         if stream and stream != "auto" and not job.options.extract_embedded:
             return f"PGS · {stream}"  # A specifier passed through untouched.
-        return "Probing..." if job.status is JobStatus.QUEUED else "Automatic"
+        if resolving is None:
+            resolving = job.status is JobStatus.QUEUED
+        return "Probing..." if resolving else "Automatic"
     return reference.effective(job.reference_track, engine).describe()
 
 
-def _track_tooltip(job: SyncJob) -> str:
+def _track_tooltip(job: SyncJob, resolving: bool) -> str:
     if not needs_ffmpeg(job.reference_path):
         return "The reference is a subtitle or speech file, so it is used as is."
     if job.options.engine is EngineId.LAPSE:
         return "lapse searches the video's subtitle tracks itself."
     track = job.reference_track
     if track is None:
-        return "The video's tracks have not been read yet."
+        if resolving:
+            return "The video's tracks have not been read yet."
+        return "The track is picked when the job runs."
     lines: list[str] = []
     if track.index is not None:
         lines.append(f"Stream s:{track.index}")
@@ -212,6 +220,14 @@ class JobTableModel(QAbstractTableModel):
         column = index.column()
         if role == Qt.ItemDataRole.CheckStateRole and column == COLUMN_RUN:
             return Qt.CheckState.Checked if job.enabled else Qt.CheckState.Unchecked
+        if column == COLUMN_TRACK and role in (
+            Qt.ItemDataRole.DisplayRole,
+            Qt.ItemDataRole.ToolTipRole,
+        ):
+            resolving = self._queue.resolving(job)
+            if role == Qt.ItemDataRole.DisplayRole:
+                return track_text(job, resolving)
+            return _track_tooltip(job, resolving)
         if role == Qt.ItemDataRole.DisplayRole:
             return self._display(job, column)
         if role == Qt.ItemDataRole.ToolTipRole:
@@ -236,8 +252,6 @@ class JobTableModel(QAbstractTableModel):
                 return _STATUS_LABELS.get(job.status, job.status.value)
             case _ if column == COLUMN_REFERENCE:
                 return job.reference_path.name
-            case _ if column == COLUMN_TRACK:
-                return track_text(job)
             case _ if column == COLUMN_SUBTITLE:
                 return job.subtitle_path.name
             case _ if column == COLUMN_LANGUAGE:
@@ -263,8 +277,6 @@ class JobTableModel(QAbstractTableModel):
         match column:
             case _ if column == COLUMN_REFERENCE:
                 return str(job.reference_path)
-            case _ if column == COLUMN_TRACK:
-                return _track_tooltip(job)
             case _ if column == COLUMN_SUBTITLE:
                 return str(job.subtitle_path)
             case _ if column == COLUMN_ENGINE:

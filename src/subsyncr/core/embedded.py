@@ -85,9 +85,19 @@ class Track:
 
 def probe_tracks(video: Path, ffmpeg_path: str = "") -> list[Track]:
     """Every subtitle stream ffprobe can see in this file."""
+    return read_tracks(video, ffmpeg_path) or []
+
+
+def read_tracks(video: Path, ffmpeg_path: str = "") -> list[Track] | None:
+    """Like ``probe_tracks``, but None when the file could not be read at all.
+
+    An empty list means the video has no subtitle streams; None means ffprobe
+    is missing, timed out, or the file was unreachable. Callers that remember
+    the answer must tell the two apart.
+    """
     status = probe(ffmpeg_path)
     if not status.ready or status.ffprobe is None:
-        return []
+        return None
     command = [
         str(status.ffprobe),
         "-v",
@@ -114,7 +124,7 @@ def probe_tracks(video: Path, ffmpeg_path: str = "") -> list[Track]:
         )
     except (OSError, subprocess.SubprocessError) as exc:
         _log.debug("could not probe %s for subtitle tracks: %s", video, exc)
-        return []
+        return None
     if completed.returncode != 0:
         _log.debug(
             "ffprobe exited %d on %s: %s",
@@ -122,12 +132,12 @@ def probe_tracks(video: Path, ffmpeg_path: str = "") -> list[Track]:
             video,
             completed.stderr.strip()[-300:],
         )
-        return []
+        return None
     try:
         payload = json.loads(completed.stdout or "{}")
     except json.JSONDecodeError as exc:
         _log.debug("unreadable ffprobe output for %s: %s", video, exc)
-        return []
+        return None
 
     tracks: list[Track] = []
     for position, stream in enumerate(payload.get("streams") or []):

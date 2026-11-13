@@ -15,6 +15,9 @@
   to, remembered across restarts. A field that already names a path still wins.
 - Name the track a failed ffsubsync alignment used (e.g. "against PGS · eng (s:0)"),
   and point the Result tooltip at Sync against so another track is one click away.
+- A video whose tracks cannot be read when it is queued (ffprobe missing, a network
+  share still waking up) is no longer settled as Audio for good: the track is picked
+  when the job runs, and Retry reads the video again.
 
 ## [0.1.0] - 2026-10-01
 

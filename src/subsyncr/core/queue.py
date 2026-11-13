@@ -225,11 +225,16 @@ class SyncQueue:
                         counts.skipped += 1
         return counts
 
-    def tracks_for(self, video: Path, ffmpeg_path: str = "") -> list[Track]:
-        """Every subtitle track in a reference, probing it if need be."""
+    def tracks_for(self, video: Path, ffmpeg_path: str = "") -> list[Track] | None:
+        """Every subtitle track in a reference, or None if it can't be read."""
         if not needs_ffmpeg(video):
             return []
         return self._probe.tracks(video, ffmpeg_path)
+
+    def resolving(self, job: SyncJob) -> bool:
+        """Whether this job's track is still waiting to be read."""
+        with self._lock:
+            return self._needs_resolving(job)
 
     def pending_groups(self) -> int:
         """How many distinct worker processes the remaining work needs."""
@@ -309,6 +314,8 @@ class SyncQueue:
             for job in self._jobs:
                 if job.id in wanted and job.status.is_retryable:
                     job.reset_for_retry()
+                    # The video may be readable now, if it was not before.
+                    self._unresolvable.discard(job.id)
                     changed.append(job)
             if changed:
                 self._persist()
@@ -316,6 +323,7 @@ class SyncQueue:
             self._emit_job_changed(job)
         if changed:
             self._notify_queue_changed()
+            self._resolve_in_background()
             if self._draining:
                 self._ensure_workers()
         return len(changed)
@@ -435,11 +443,25 @@ class SyncQueue:
                 tracks = self._probe.tracks(
                     job.reference_path, job.options.environment.ffmpeg_path
                 )
-                choice = reference.choose(tracks, job.options, job.language)
+                choice = (
+                    None
+                    if tracks is None
+                    else reference.choose(tracks, job.options, job.language)
+                )
                 with self._lock:
                     if self._shutdown:
                         return
                     if not self._needs_resolving(job):
+                        continue
+                    if tracks is None:
+                        # Saving "audio" here would quietly drop PGS for good;
+                        # leave it open, and the worker reads the file itself.
+                        self._unresolvable.add(job.id)
+                        _log.info(
+                            "%s: could not read its subtitle tracks yet;"
+                            " the track is picked when it runs",
+                            job.reference_path.name,
+                        )
                         continue
                     if choice is None:
                         self._unresolvable.add(job.id)

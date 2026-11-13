@@ -135,7 +135,7 @@ def _stub(monkeypatch: pytest.MonkeyPatch) -> None:
     _Process.instances = []
     monkeypatch.setattr(queue_module, "SyncProcess", _Process)
     monkeypatch.setattr(queue_module, "validate", lambda job: None)
-    monkeypatch.setattr(embedded, "probe_tracks", lambda *_: list(DUAL_AUDIO))
+    monkeypatch.setattr(embedded, "read_tracks", lambda *_: list(DUAL_AUDIO))
 
 
 @pytest.fixture
@@ -261,6 +261,58 @@ def test_a_chosen_track_survives_a_restart(
     job.reference_track = ReferenceTrack(ReferenceKind.PGS, 2, "eng", chosen=True)
     store.save_jobs([job])
     assert store.load_jobs()[0].reference_track == job.reference_track
+
+
+def test_an_unreadable_video_is_not_settled_as_audio(
+    build_queue: Callable[[], SyncQueue],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A share that is still waking up must not cost the job its PGS track."""
+    monkeypatch.setattr(embedded, "read_tracks", lambda *_: None)
+    queue = build_queue()
+    job = _job(tmp_path, "en")
+    queue.add([job])
+    _drain(queue)
+    assert job.reference_track is None
+    assert job.status is JobStatus.SUCCEEDED  # The worker picked it instead.
+    assert _Process.instances[0].spec["reference_track"] is None
+    assert not queue.resolving(job)
+
+
+def test_a_video_without_subtitles_is_settled_as_audio(
+    build_queue: Callable[[], SyncQueue],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(embedded, "read_tracks", lambda *_: [])
+    queue = build_queue()
+    queue.add([_job(tmp_path, "en")])
+    _wait_resolved(queue)
+    assert queue.snapshot()[0].reference_track == ReferenceTrack.audio()
+
+
+def test_a_retry_reads_the_video_again(
+    build_queue: Callable[[], SyncQueue],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answers: list[list[Track] | None] = [None, list(DUAL_AUDIO)]
+    monkeypatch.setattr(embedded, "read_tracks", lambda *_: answers.pop(0))
+    queue = build_queue()
+    job = _job(tmp_path, "en")
+    job.status = JobStatus.FAILED
+    queue.add([job])
+    queue.set_reference([job.id], None)  # The first read fails.
+    deadline = time.monotonic() + 5
+    while queue.resolving(job) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert job.reference_track is None
+    job.status = JobStatus.FAILED
+    queue.retry([job.id])
+    _wait_resolved(queue)
+    assert job.reference_track is not None
+    assert job.reference_track.index == 2
 
 
 # -- the worker ----------------------------------------------------------

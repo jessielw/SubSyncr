@@ -393,7 +393,12 @@ class MainWindow(QMainWindow):
             next(iter(videos)), jobs[0].options.environment.ffmpeg_path
         )
         if not tracks:
-            note = menu.addAction("No subtitle tracks found")
+            text = (
+                "Could not read this video's tracks"
+                if tracks is None
+                else "No subtitle tracks found"
+            )
+            note = menu.addAction(text)
             note.setEnabled(False)
             return menu
         menu.addSeparator()
