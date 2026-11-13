@@ -34,7 +34,7 @@ jobs:
           # against an older glibc and the build runs on more distributions.
           - os: ubuntu-22.04
             target: linux-x64
-          - os: macos-14
+          - os: macos-15
             target: macos-arm64
           - os: macos-15-intel
             target: macos-x64
