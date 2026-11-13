@@ -1,6 +1,6 @@
 [project]
 name = "subsyncr"
-version = "0.1.0"
+version = "0.1.1"
 description = "A cross-platform batch queue for subtitle synchronization"
 readme = "README.md"
 license = "MIT"

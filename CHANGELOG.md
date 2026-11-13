@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.1] - 2026-11-12
 
 - Skip Signs & Songs and forced-titled PGS tracks when choosing the reference
   automatically, even when the release leaves them unflagged or makes them default.
