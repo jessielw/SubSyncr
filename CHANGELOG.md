@@ -18,6 +18,9 @@
 - A video whose tracks cannot be read when it is queued (ffprobe missing, a network
   share still waking up) is no longer settled as Audio for good: the track is picked
   when the job runs, and Retry reads the video again.
+- Sync against works across several videos: it offers each track language every
+  selected video has in full (e.g. "PGS · eng") and gives each episode its own
+  matching stream, so a whole season can be switched in one click.
 
 ## [0.1.0] - 2026-10-01
 

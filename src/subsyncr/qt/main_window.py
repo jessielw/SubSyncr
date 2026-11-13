@@ -42,7 +42,7 @@ from subsyncr.core.config import (
 )
 from subsyncr.core.embedded import IMAGE_CODECS, PGS_CODEC
 from subsyncr.core.engines import EngineId
-from subsyncr.core.models import JobStatus, ReferenceTrack, SyncJob
+from subsyncr.core.models import JobStatus, ReferenceKind, ReferenceTrack, SyncJob
 from subsyncr.core.queue import QueueCounts, SyncQueue
 from subsyncr.core.scanner import MEDIA_EXTENSIONS, SUBTITLE_EXTENSIONS, needs_ffmpeg
 from subsyncr.core.speech_cache import SpeechCache
@@ -368,39 +368,46 @@ class MainWindow(QMainWindow):
         ids = [job.id for job in jobs]
         group = QActionGroup(menu)
 
-        def offer(
-            label: str, choice: ReferenceTrack | None, enabled: bool = True
+        def add(
+            label: str,
+            apply: Callable[[], object],
+            checked: bool,
+            enabled: bool = True,
         ) -> None:
             action = QAction(label, menu)
             action.setCheckable(True)
             action.setEnabled(enabled)
-            token = choice.token if choice is not None else None
-            action.setChecked(picked == {token})
-            action.triggered.connect(
-                lambda _=False, pick=choice: self.queue.set_reference(ids, pick)
-            )
+            action.setChecked(checked)
+            action.triggered.connect(lambda _=False: apply())
             group.addAction(action)
             menu.addAction(action)
 
+        def offer(
+            label: str, choice: ReferenceTrack | None, enabled: bool = True
+        ) -> None:
+            token = choice.token if choice is not None else None
+            add(
+                label,
+                lambda: self.queue.set_reference(ids, choice),
+                picked == {token},
+                enabled,
+            )
+
+        def note(text: str) -> QMenu:
+            menu.addAction(text).setEnabled(False)
+            return menu
+
         offer("Automatic", None)
         offer("Audio", ReferenceTrack.audio(chosen=True))
-        videos = {job.reference_path for job in jobs}
-        if len(videos) != 1:
-            note = menu.addAction("Select one video's jobs to pick a track")
-            note.setEnabled(False)
-            return menu
-        tracks = self.queue.tracks_for(
-            next(iter(videos)), jobs[0].options.environment.ffmpeg_path
-        )
+        videos = list(dict.fromkeys(job.reference_path for job in jobs))
+        ffmpeg_path = jobs[0].options.environment.ffmpeg_path
+        if len(videos) > 1:
+            return self._language_choices(menu, jobs, videos, ffmpeg_path, add, note)
+        tracks = self.queue.tracks_for(videos[0], ffmpeg_path)
         if not tracks:
-            text = (
-                "Could not read this video's tracks"
-                if tracks is None
-                else "No subtitle tracks found"
-            )
-            note = menu.addAction(text)
-            note.setEnabled(False)
-            return menu
+            if tracks is None:
+                return note("Could not read this video's tracks")
+            return note("No subtitle tracks found")
         menu.addSeparator()
         for track in tracks:
             if track.codec in IMAGE_CODECS and track.codec != PGS_CODEC:
@@ -416,6 +423,57 @@ class MainWindow(QMainWindow):
                 choice,
                 all(reference.usable(track, job.options.engine) for job in jobs),
             )
+        return menu
+
+    def _language_choices(
+        self,
+        menu: QMenu,
+        jobs: list[SyncJob],
+        videos: list[Path],
+        ffmpeg_path: str,
+        add: Callable[[str, Callable[[], object], bool, bool], None],
+        note: Callable[[str], QMenu],
+    ) -> QMenu:
+        """Across several videos, offer a track by language, not by stream.
+
+        Each video gets its own best full track in that language, since an
+        episode's stream numbers need not match the next one's.
+        """
+        # Usually instant: the queue read these when the jobs were added.
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            found = {
+                video: self.queue.tracks_for(video, ffmpeg_path) for video in videos
+            }
+        finally:
+            QApplication.restoreOverrideCursor()
+        if any(tracks is None for tracks in found.values()):
+            return note("Could not read every video's tracks")
+        readable = {video: tracks or [] for video, tracks in found.items()}
+        choices = reference.shared_languages(list(readable.values()))
+        if not choices:
+            return note("No track language all these videos share")
+        menu.addSeparator()
+        for choice in choices:
+            picks = {
+                video: choice.in_video(tracks) for video, tracks in readable.items()
+            }
+
+            def apply(picks: dict[Path, ReferenceTrack | None] = picks) -> None:
+                for video, pick in picks.items():
+                    ids = [job.id for job in jobs if job.reference_path == video]
+                    self.queue.set_reference(ids, pick)
+
+            checked = all(
+                job.reference_track is not None
+                and job.reference_track.chosen
+                and job.reference_track == picks.get(job.reference_path)
+                for job in jobs
+            )
+            enabled = choice.kind is ReferenceKind.TEXT or all(
+                job.options.engine is EngineId.FFSUBSYNC for job in jobs
+            )
+            add(f"{choice.label}  (each video's own track)", apply, checked, enabled)
         return menu
 
     @Slot()

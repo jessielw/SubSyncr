@@ -371,3 +371,34 @@ def test_a_failure_says_what_it_was_aligned_against() -> None:
     # A text track that never extracted left the video as the reference.
     assert aligned_against(_spec(ReferenceTrack(ReferenceKind.TEXT, 4))) == "the audio"
     assert aligned_against(_spec(None)) == ""
+
+
+# -- picking by language across videos ------------------------------------
+
+
+def test_languages_every_video_has_in_full_are_offered() -> None:
+    # Episode 2 numbers its streams differently and has only Signs in Spanish.
+    episode_two = [
+        Track(index=0, codec=PGS, language="en"),
+        Track(index=1, codec=PGS, language="spa", title="Signs & Songs"),
+        Track(index=2, codec="subrip", language="eng"),
+    ]
+    choices = reference.shared_languages([DUAL_AUDIO, episode_two])
+    assert [choice.label for choice in choices] == ["PGS · eng"]
+
+
+def test_each_video_gets_its_own_stream() -> None:
+    episode_two = [
+        Track(index=0, codec=PGS, language="eng", title="Signs & Songs"),
+        Track(index=5, codec=PGS, language="eng"),
+    ]
+    (english,) = reference.shared_languages([DUAL_AUDIO[::2], episode_two])
+    first, second = english.in_video(DUAL_AUDIO), english.in_video(episode_two)
+    assert first is not None and second is not None
+    assert (first.index, second.index) == (2, 5)
+    assert first.chosen and second.chosen
+
+
+def test_untagged_tracks_are_not_offered_by_language() -> None:
+    untagged = [Track(index=0, codec=PGS), Track(index=1, codec=PGS, language="und")]
+    assert reference.shared_languages([untagged, untagged]) == []

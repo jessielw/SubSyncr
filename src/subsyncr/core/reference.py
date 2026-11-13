@@ -12,13 +12,16 @@ shown in the queue, and can be overridden; the worker then does what it says.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 import re
 import threading
 
 from subsyncr.core import embedded
-from subsyncr.core.embedded import Track
+from subsyncr.core.embedded import PGS_CODEC, Track
 from subsyncr.core.engines import EngineId
+from subsyncr.core.language import canonical
 from subsyncr.core.models import ReferenceKind, ReferenceTrack, SyncOptions
 
 # The forms the settings box documents ("s:2"), plus ffsubsync's own "0:s:2".
@@ -66,6 +69,86 @@ def choose(
         language=known.language if known else "",
         title=known.title if known else "",
     )
+
+
+@dataclass(frozen=True)
+class LanguageChoice:
+    """One kind of track in one language, e.g. the English PGS, in any video.
+
+    Stream numbers differ from episode to episode; "the full English PGS
+    track" is what a season's worth of selected jobs can share.
+    """
+
+    kind: ReferenceKind
+    key: str  # What tracks are matched on: "en" for both "eng" and "en".
+    shown: str  # The tag as the first video spells it, e.g. "eng".
+
+    @property
+    def label(self) -> str:
+        return ReferenceTrack(self.kind, None, self.shown).describe()
+
+    def in_video(self, tracks: Sequence[Track]) -> ReferenceTrack | None:
+        """This video's best full track of this kind and language."""
+        matching = [
+            track
+            for track in tracks
+            if _offerable(track)
+            and not track.is_partial
+            and _kind(track) is self.kind
+            and _language_key(track) == self.key
+        ]
+        best = (
+            embedded.choose_pgs(matching)
+            if self.kind is ReferenceKind.PGS
+            else embedded.choose(matching)
+        )
+        return from_track(best, chosen=True) if best is not None else None
+
+
+def shared_languages(videos: Sequence[Sequence[Track]]) -> list[LanguageChoice]:
+    """Each (kind, language) that every video has a full track for.
+
+    Ordered as the first video lists them. A language some episode only has
+    as Signs & Songs is left out: picking it there would bring the failure
+    back.
+    """
+    if not videos:
+        return []
+
+    def keys(tracks: Sequence[Track]) -> set[tuple[ReferenceKind, str]]:
+        return {
+            (_kind(track), key)
+            for track in tracks
+            if _offerable(track)
+            and not track.is_partial
+            and (key := _language_key(track))
+        }
+
+    common = set.intersection(*(keys(tracks) for tracks in videos))
+    choices: list[LanguageChoice] = []
+    for track in videos[0]:
+        key = _language_key(track)
+        if key is None or (_kind(track), key) not in common:
+            continue
+        common.discard((_kind(track), key))
+        choices.append(LanguageChoice(_kind(track), key, track.language))
+    return choices
+
+
+def _offerable(track: Track) -> bool:
+    """Text, or the one image format an engine reads (PGS)."""
+    return track.is_text or track.codec == PGS_CODEC
+
+
+def _kind(track: Track) -> ReferenceKind:
+    return ReferenceKind.TEXT if track.is_text else ReferenceKind.PGS
+
+
+def _language_key(track: Track) -> str | None:
+    tag = track.language.strip()
+    if not tag or tag.casefold() == "und":
+        return None
+    return canonical(tag) or tag.casefold()
 
 
 def usable(track: Track, engine: EngineId) -> bool:

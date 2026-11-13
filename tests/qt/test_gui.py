@@ -882,3 +882,32 @@ def test_a_failed_alignment_points_at_the_track_menu(
     job.options.engine = EngineId.LAPSE
     tip = str(model.data(model.index(0, COLUMN_RESULT), Qt.ItemDataRole.ToolTipRole))
     assert "Sync against" not in tip
+
+
+def test_sync_against_picks_by_language_across_videos(
+    window: MainWindow,
+    make_job: Callable[..., SyncJob],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pgs = "hdmv_pgs_subtitle"
+    one, two = make_job("Show.S01E01"), make_job("Show.S01E02")
+    tracks = {
+        one.reference_path: [
+            Track(index=0, codec=pgs, language="eng", title="Signs"),
+            Track(index=1, codec=pgs, language="eng"),
+        ],
+        two.reference_path: [Track(index=3, codec=pgs, language="eng")],
+    }
+    monkeypatch.setattr(window.queue, "tracks_for", lambda video, *_: tracks[video])
+    for job in (one, two):
+        job.status = JobStatus.FAILED
+    window.queue.add([one, two])
+    window.table.selectAll()
+
+    parent = QMenu()
+    menu = window._reference_menu(parent)
+    pick = next(a for a in menu.actions() if a.text().startswith("PGS · eng"))
+    pick.trigger()
+    assert one.reference_track is not None and two.reference_track is not None
+    assert (one.reference_track.index, two.reference_track.index) == (1, 3)
+    assert one.status is JobStatus.QUEUED
