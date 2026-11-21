@@ -10,13 +10,15 @@ responsible for marshalling them (see ``subsyncr.qt.bridge``).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 import contextlib
 from dataclasses import dataclass
 import json
 import logging
+import os
 from pathlib import Path
 import threading
+import time
 
 from subsyncr.core import logger, reference
 from subsyncr.core.config import AppConfig
@@ -30,7 +32,6 @@ from subsyncr.core.engine import (
 )
 from subsyncr.core.engines import EngineId
 from subsyncr.core.models import JobStatus, ReferenceTrack, SyncJob, SyncResult
-from subsyncr.core.output import same_path
 from subsyncr.core.scanner import needs_ffmpeg
 from subsyncr.core.speech_cache import SpeechCache
 from subsyncr.core.store import JobStore
@@ -131,6 +132,42 @@ def _log_outcome(job: SyncJob) -> None:
         _log.info("%s: %s", name, job.status.value)
 
 
+class _PathIdentities:
+    """``same_path`` for many comparisons, reading each path from disk once.
+
+    The conflict check compares every output with three paths of every other
+    queued job; calling ``same_path`` per pair resolved and stat'ed the same
+    files over and over, which on a network share added up to seconds.
+    """
+
+    def __init__(self) -> None:
+        self._resolved: dict[Path, Path] = {}
+        self._stats: dict[Path, os.stat_result | None] = {}
+
+    def same(self, left: Path, right: Path) -> bool:
+        if self._resolve(left) == self._resolve(right):
+            return True
+        first, second = self._stat(left), self._stat(right)
+        # What Path.samefile does, minus the repeat stat calls.
+        return (
+            first is not None and second is not None and os.path.samestat(first, second)
+        )
+
+    def _resolve(self, path: Path) -> Path:
+        resolved = self._resolved.get(path)
+        if resolved is None:
+            resolved = self._resolved[path] = path.resolve()
+        return resolved
+
+    def _stat(self, path: Path) -> os.stat_result | None:
+        if path not in self._stats:
+            try:
+                self._stats[path] = path.stat()
+            except OSError:
+                self._stats[path] = None
+        return self._stats[path]
+
+
 def _crash_results(group: list[SyncJob], exc: Exception) -> dict[str, SyncResult]:
     """The outcome for a group whose run raised something nobody expected."""
     return {
@@ -163,6 +200,16 @@ class SyncQueue:
 
         self._lock = threading.RLock()
         self._jobs: list[SyncJob] = store.load_jobs() if persist_queue else []
+        # Saving rewrites the whole table, which takes a while on a long queue.
+        # It happens after the queue lock is released, so the GUI thread is
+        # never left waiting on SQLite: ``_persist`` asks for a save under the
+        # lock, ``_flush_persist`` writes the newest snapshot outside it.
+        self._persist_lock = threading.Lock()
+        self._persist_wanted = 0
+        self._persist_written = 0
+        # Stopping a worker can take seconds (see SyncProcess.cancel), so it
+        # happens on these threads rather than the caller's.
+        self._cancellers: list[threading.Thread] = []
         # Every job in a running group maps to that group's single process.
         self._processes: dict[str, SyncProcess] = {}
         self._workers: list[threading.Thread] = []
@@ -226,10 +273,23 @@ class SyncQueue:
         return counts
 
     def tracks_for(self, video: Path, ffmpeg_path: str = "") -> list[Track] | None:
-        """Every subtitle track in a reference, or None if it can't be read."""
+        """Every subtitle track in a reference, or None if it can't be read.
+
+        Runs ffprobe when the video has not been read yet, so keep it off the
+        GUI thread; ``cached_tracks`` is the non-blocking way to ask.
+        """
         if not needs_ffmpeg(video):
             return []
         return self._probe.tracks(video, ffmpeg_path)
+
+    def cached_tracks(self, video: Path) -> list[Track] | None:
+        """The tracks already read for this video, or None if not read yet.
+
+        Never touches the file, so it is safe to call from the GUI thread.
+        """
+        if not needs_ffmpeg(video):
+            return []
+        return self._probe.peek(video)
 
     def resolving(self, job: SyncJob) -> bool:
         """Whether this job's track is still waiting to be read."""
@@ -247,7 +307,7 @@ class SyncQueue:
         additions = list(jobs)
         if not additions:
             return 0
-        with self._lock:
+        with self._editing():
             self._jobs.extend(additions)
             self._persist()
         self._notify_queue_changed()
@@ -267,7 +327,7 @@ class SyncQueue:
         """
         wanted = set(job_ids)
         changed: list[SyncJob] = []
-        with self._lock:
+        with self._editing():
             for job in self._jobs:
                 if job.id not in wanted or job.status in (
                     JobStatus.RUNNING,
@@ -293,7 +353,7 @@ class SyncQueue:
 
     def remove(self, job_ids: Iterable[str]) -> int:
         wanted = set(job_ids)
-        with self._lock:
+        with self._editing():
             # A running job must be cancelled before it can be removed.
             removable = {
                 job.id
@@ -310,7 +370,7 @@ class SyncQueue:
     def retry(self, job_ids: Iterable[str]) -> int:
         wanted = set(job_ids)
         changed: list[SyncJob] = []
-        with self._lock:
+        with self._editing():
             for job in self._jobs:
                 if job.id in wanted and job.status.is_retryable:
                     job.reset_for_retry()
@@ -329,7 +389,7 @@ class SyncQueue:
         return len(changed)
 
     def set_enabled(self, job_id: str, enabled: bool) -> bool:
-        with self._lock:
+        with self._editing():
             job = next((item for item in self._jobs if item.id == job_id), None)
             if job is None or job.status is not JobStatus.QUEUED:
                 return False
@@ -340,7 +400,7 @@ class SyncQueue:
         return True
 
     def clear_finished(self) -> int:
-        with self._lock:
+        with self._editing():
             before = len(self._jobs)
             self._jobs = [job for job in self._jobs if not job.status.is_terminal]
             removed = before - len(self._jobs)
@@ -377,30 +437,66 @@ class SyncQueue:
             process = self._processes.get(job_id)
         if process is None:
             return False
-        process.cancel()
+        self._stop_processes([process])
         return True
 
     def cancel_all(self) -> int:
+        """Ask every running worker to stop. Returns without waiting for them."""
         with self._lock:
             self._draining = False
             processes = list(dict.fromkeys(self._processes.values()))
-        for process in processes:
-            process.cancel()
+        self._stop_processes(processes)
         return len(processes)
 
     def shutdown(self, timeout: float = 10.0) -> None:
+        """Cancel everything and wait, up to ``timeout`` seconds in all."""
+        deadline = time.monotonic() + timeout
         with self._lock:
+            if self._shutdown:
+                return  # Already done; the store may be closed by now.
             self._shutdown = True
             self._draining = False
             workers = list(self._workers)
             probers = list(self._probers)
         self.cancel_all()
-        for thread in (*workers, *probers):
-            thread.join(timeout=timeout)
+        with self._lock:
+            cancellers = list(self._cancellers)
+        # Cancellers first: they are what makes the workers return.
+        for thread in (*cancellers, *workers, *probers):
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
         with self._lock:
             self._persist()
+        self._flush_persist(final=True)
 
     # -- internals -------------------------------------------------------
+
+    def _stop_processes(self, processes: Iterable[SyncProcess]) -> None:
+        """Cancel workers in parallel, off the calling thread.
+
+        ``SyncProcess.cancel`` waits for the child to exit and escalates to
+        terminate and kill: seconds per worker in the worst case. Run from a
+        button on the GUI thread, that froze the window for all of it.
+        """
+        started: list[threading.Thread] = []
+        for process in processes:
+            thread = threading.Thread(
+                target=process.cancel, name="subsyncr-cancel", daemon=True
+            )
+            thread.start()
+            started.append(thread)
+        if started:
+            with self._lock:
+                self._cancellers = [
+                    thread for thread in self._cancellers if thread.is_alive()
+                ]
+                self._cancellers.extend(started)
+
+    @contextlib.contextmanager
+    def _editing(self) -> Iterator[None]:
+        """Hold the queue lock for a change, then save once it is released."""
+        with self._lock:
+            yield
+        self._flush_persist()
 
     def _ensure_workers(self) -> None:
         with self._lock:
@@ -469,7 +565,7 @@ class SyncQueue:
                     job.reference_track = choice
                     changed.append(job)
             if changed:
-                with self._lock:
+                with self._editing():
                     if self._shutdown:
                         return  # shutdown() has saved, and the store may be closed.
                     self._persist()
@@ -498,7 +594,7 @@ class SyncQueue:
 
     def _claim_group(self) -> list[SyncJob]:
         """Take every runnable job that shares the next group's key."""
-        with self._lock:
+        with self._editing():
             if not self._draining or self._shutdown:
                 return []
             # A job whose track is still being probed is not ready to group.
@@ -543,7 +639,7 @@ class SyncQueue:
 
     def _finish(self, group: list[SyncJob], results: dict[str, SyncResult]) -> None:
         """Write a group's outcome back and tell everyone who is listening."""
-        with self._lock:
+        with self._editing():
             for job in group:
                 result = results.get(
                     job.id,
@@ -586,32 +682,33 @@ class SyncQueue:
         # worker can publish. Ambiguous destinations require user correction;
         # replace_output only authorizes replacing an existing output, not
         # throwing away a different job's result or input.
+        # The snapshot is taken under the lock; the comparison is not. It
+        # touches the disk for every path, and done under the lock it held up
+        # the GUI thread (which reads the queue to paint) for the whole scan.
         with self._lock:
             candidates = {job.id: job for job in [*self._jobs, *group]}
             active = [
-                job
+                (
+                    job.id,
+                    (job.effective_output, job.subtitle_path, job.reference_path),
+                )
                 for job in candidates.values()
                 if job.status in (JobStatus.QUEUED, JobStatus.RUNNING)
             ]
-            conflicts: dict[str, str] = {}
-            for job in group:
-                for other in active:
-                    if job.id == other.id:
-                        continue
-                    if any(
-                        same_path(job.effective_output, path)
-                        for path in (
-                            other.effective_output,
-                            other.subtitle_path,
-                            other.reference_path,
-                        )
-                    ):
-                        conflicts[job.id] = (
-                            "Output conflicts with another queued job: "
-                            f"{job.effective_output}. Choose distinct output names "
-                            "or remove the conflicting job."
-                        )
-                        break
+            outputs = [(job.id, job.effective_output) for job in group]
+        conflicts: dict[str, str] = {}
+        identify = _PathIdentities()
+        for job_id, output in outputs:
+            for other_id, paths in active:
+                if job_id == other_id:
+                    continue
+                if any(identify.same(output, path) for path in paths):
+                    conflicts[job_id] = (
+                        "Output conflicts with another queued job: "
+                        f"{output}. Choose distinct output names "
+                        "or remove the conflicting job."
+                    )
+                    break
         for job in group:
             try:
                 if job.id in conflicts:
@@ -757,12 +854,40 @@ class SyncQueue:
         return produced
 
     def _persist(self) -> None:
+        """Ask for the queue to be saved. Call with the queue lock held.
+
+        The write itself happens in ``_flush_persist`` once the lock is
+        released; ``_editing`` does both.
+        """
+        if self._persist_queue:
+            self._persist_wanted += 1
+
+    def _flush_persist(self, *, final: bool = False) -> None:
+        """Write the newest snapshot, unless something newer already landed.
+
+        The snapshot is taken under the queue lock, which is then released
+        before the write lock is taken, and the write never takes the queue
+        lock - so the two cannot deadlock, and a writer holding an older
+        snapshot skips its write once a newer one is saved.
+        """
         if not self._persist_queue:
             return
-        try:
-            self._store.save_jobs(self._jobs)
-        except Exception:
-            _log.exception("could not save the queue")
+        with self._lock:
+            if self._shutdown and not final:
+                return  # shutdown() saves last; the store may already be closed.
+            generation = self._persist_wanted
+            if generation <= self._persist_written:
+                return
+            jobs = list(self._jobs)
+        with self._persist_lock:
+            if generation <= self._persist_written:
+                return
+            try:
+                self._store.save_jobs(jobs)
+            except Exception:
+                _log.exception("could not save the queue")
+            else:
+                self._persist_written = generation
 
     def _emit_job_changed(self, job: SyncJob) -> None:
         if self._callbacks.job_changed is not None:

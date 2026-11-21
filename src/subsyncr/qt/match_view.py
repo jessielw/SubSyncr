@@ -35,7 +35,7 @@ from subsyncr.core import engines
 from subsyncr.core.engine import capability_problem, first_capable
 from subsyncr.core.engines import EngineId
 from subsyncr.core.language import parse_subtitle_tags
-from subsyncr.core.matcher import DEFAULT_THRESHOLD, propose_matches
+from subsyncr.core.matcher import DEFAULT_THRESHOLD, MatchPlan, propose_matches
 from subsyncr.core.models import MatchMethod, SyncJob, SyncOptions
 from subsyncr.core.planner import build_job, group_key_for
 from subsyncr.core.scanner import scan_references, scan_subtitles
@@ -49,6 +49,7 @@ from subsyncr.qt.widgets import (
     EngineCombo,
     PathField,
     enable_row_stripes,
+    run_off_thread,
 )
 
 COLUMN_INCLUDE = 0
@@ -58,6 +59,15 @@ COLUMN_LANGUAGE = 3
 COLUMN_METHOD = 4
 COLUMN_CONFIDENCE = 5
 COLUMN_NOTES = 6
+
+
+def _plan(references: list[Path], subtitles: list[Path], threshold: float) -> MatchPlan:
+    """Pair the files up. Pure, so it can run off the GUI thread."""
+    # A file cannot be its own reference, which is easy to hit when the
+    # references are subtitles from the same folder.
+    chosen = set(references)
+    subtitles = [path for path in subtitles if path not in chosen]
+    return propose_matches(references, subtitles, threshold=threshold)
 
 
 @dataclass
@@ -267,29 +277,40 @@ class BatchMatchDialog(QDialog):
 
         recursive = self.recursive.isChecked()
         subtitle_reference = self.subtitle_reference.isChecked()
-        videos = scan_references(
-            video_dir,
-            subtitles_as_reference=subtitle_reference,
-            recursive=recursive,
-            output_suffix=self._output_suffix,
-        )
-        subtitles = scan_subtitles(
-            subtitle_dir, recursive=recursive, output_suffix=self._output_suffix
-        )
-        if not videos:
+        threshold = self.threshold.value()
+        output_suffix = self._output_suffix
+
+        def work() -> MatchPlan | None:
+            videos = scan_references(
+                video_dir,
+                subtitles_as_reference=subtitle_reference,
+                recursive=recursive,
+                output_suffix=output_suffix,
+            )
+            if not videos:
+                return None
+            subtitles = scan_subtitles(
+                subtitle_dir, recursive=recursive, output_suffix=output_suffix
+            )
+            return _plan(videos, subtitles, threshold)
+
+        # A recursive walk of a share, then matching every file against every
+        # other, is seconds of work: off the GUI thread, so the window paints.
+        self.summary.setText("Scanning...")
+        plan = run_off_thread(work)
+        if plan is None:
             kind = "subtitle" if subtitle_reference else "video"
+            self._update_summary()  # Whatever the last scan found still stands.
             QMessageBox.information(self, "Scan", f"No {kind} references found.")
             return
-        self.load_files(videos, subtitles)
+        self._show_plan(plan)
 
     def load_files(self, references: list[Path], subtitles: list[Path]) -> None:
         """Populate the review grid from an explicit set of files."""
-        # A file cannot be its own reference, which is easy to hit when the
-        # references are subtitles from the same folder.
-        chosen = set(references)
-        subtitles = [path for path in subtitles if path not in chosen]
+        threshold = self.threshold.value()
+        self._show_plan(run_off_thread(lambda: _plan(references, subtitles, threshold)))
 
-        plan = propose_matches(references, subtitles, threshold=self.threshold.value())
+    def _show_plan(self, plan: MatchPlan) -> None:
         self._rows = [
             _Row(
                 video=match.video,

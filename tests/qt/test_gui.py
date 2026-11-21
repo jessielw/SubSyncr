@@ -144,17 +144,64 @@ def test_bridge_delivers_worker_thread_events_to_the_gui(
     job = make_job("Show.S01E01")
     window.queue.add([job])
     received: list[str] = []
-    window.bridge.log.connect(lambda jid, lvl, msg: received.append(msg))
+    window.bridge.logs.connect(
+        lambda entries: received.extend(message for _, _, message in entries)
+    )
 
     def emit_from_worker() -> None:
         callbacks = window.queue.callbacks
         assert callbacks.log is not None
         callbacks.log(job.id, "INFO", "from another thread")
 
-    with qtbot.waitSignal(window.bridge.log, timeout=3000):
+    with qtbot.waitSignal(window.bridge.logs, timeout=3000):
         threading.Thread(target=emit_from_worker).start()
     assert received == ["from another thread"]
     assert "from another thread" in window.log.toPlainText()
+
+
+def test_bridge_batches_a_flood_of_worker_events(
+    window: MainWindow, make_job: Callable[..., SyncJob], qtbot
+) -> None:
+    """Hundreds of worker events cost a handful of GUI passes, not hundreds.
+
+    One pass per event is what left the window Not Responding mid-batch.
+    """
+    jobs = [make_job(f"Show.S01E{n:02}") for n in range(1, 31)]
+    window.queue.add(jobs)
+    deliveries: list[None] = []
+    window.bridge.flushed.connect(lambda: deliveries.append(None))
+    callbacks = window.queue.callbacks
+    assert callbacks.progress is not None and callbacks.log is not None
+    assert callbacks.job_changed is not None
+
+    def flood() -> None:
+        for step in range(20):
+            for job in jobs:
+                callbacks.progress(job.id, step / 20, "Extracting speech")  # type: ignore[misc]
+                callbacks.log(job.id, "INFO", f"line {step}")  # type: ignore[misc]
+            callbacks.job_changed(jobs[step])  # type: ignore[misc]
+
+    worker = threading.Thread(target=flood)
+    worker.start()
+    worker.join()
+    qtbot.waitUntil(lambda: window.log.toPlainText().count("line 19") == 30)
+    # 1200 events; a few deliveries at most, however the timer lands.
+    assert 1 <= len(deliveries) <= 5
+    assert window.log.document().blockCount() == 600
+
+
+def test_queue_columns_measure_only_visible_rows(window: MainWindow) -> None:
+    """Measuring every row per change cost ~140 ms a tick at 1000 jobs."""
+    assert window.table.horizontalHeader().resizeContentsPrecision() == 0
+
+
+def test_a_group_finishing_keeps_the_selection(
+    window: MainWindow, make_job: Callable[..., SyncJob]
+) -> None:
+    window.queue.add([make_job("Show.S01E01"), make_job("Show.S01E02")])
+    window.table.selectRow(1)
+    window.model.refresh()  # What a finished group triggers: same rows.
+    assert window.table.selected_rows() == [1]
 
 
 def test_detach_stops_forwarding(
@@ -834,7 +881,7 @@ def test_sync_against_menu_overrides_the_track(
         Track(index=0, codec="hdmv_pgs_subtitle", language="eng", title="Signs"),
         Track(index=1, codec="hdmv_pgs_subtitle", language="eng"),
     ]
-    monkeypatch.setattr(window.queue, "tracks_for", lambda *_: tracks)
+    monkeypatch.setattr(window.queue, "cached_tracks", lambda *_: tracks)
     job = make_job("Show.S01E01")
     job.status = JobStatus.FAILED
     window.queue.add([job])
@@ -898,7 +945,7 @@ def test_sync_against_picks_by_language_across_videos(
         ],
         two.reference_path: [Track(index=3, codec=pgs, language="eng")],
     }
-    monkeypatch.setattr(window.queue, "tracks_for", lambda video, *_: tracks[video])
+    monkeypatch.setattr(window.queue, "cached_tracks", lambda video: tracks[video])
     for job in (one, two):
         job.status = JobStatus.FAILED
     window.queue.add([one, two])
@@ -911,3 +958,34 @@ def test_sync_against_picks_by_language_across_videos(
     assert one.reference_track is not None and two.reference_track is not None
     assert (one.reference_track.index, two.reference_track.index) == (1, 3)
     assert one.status is JobStatus.QUEUED
+
+
+def test_sync_against_reads_unknown_tracks_off_the_gui_thread(
+    window: MainWindow,
+    make_job: Callable[..., SyncJob],
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+) -> None:
+    """ffprobe per video on the GUI thread froze the window on a right-click."""
+    tracks = [Track(index=1, codec="hdmv_pgs_subtitle", language="eng")]
+    probed_on: list[threading.Thread] = []
+
+    def tracks_for(video: Path, ffmpeg_path: str = "") -> list[Track]:
+        probed_on.append(threading.current_thread())
+        return tracks
+
+    monkeypatch.setattr(window.queue, "cached_tracks", lambda video: None)
+    monkeypatch.setattr(window.queue, "tracks_for", tracks_for)
+    job = make_job("Show.S01E01")
+    job.status = JobStatus.FAILED
+    window.queue.add([job])
+    window.table.selectRow(0)
+
+    parent = QMenu()
+    with qtbot.waitSignal(window._tracks_read, timeout=3000):
+        menu = window._reference_menu(parent)
+        assert "Reading tracks..." in [action.text() for action in menu.actions()]
+    labels = [action.text() for action in menu.actions()]
+    assert any(label.startswith("s:1") for label in labels)
+    assert "Reading tracks..." not in labels
+    assert probed_on and threading.main_thread() not in probed_on

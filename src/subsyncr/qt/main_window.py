@@ -5,9 +5,20 @@ from __future__ import annotations
 from collections.abc import Callable
 import contextlib
 from pathlib import Path
+import threading
 import time
 
-from PySide6.QtCore import QByteArray, QPoint, QSettings, QSize, Qt, QTimer, QUrl, Slot
+from PySide6.QtCore import (
+    QByteArray,
+    QPoint,
+    QSettings,
+    QSize,
+    Qt,
+    QTimer,
+    QUrl,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -40,7 +51,7 @@ from subsyncr.core.config import (
     database_path,
     speech_cache_dir,
 )
-from subsyncr.core.embedded import IMAGE_CODECS, PGS_CODEC
+from subsyncr.core.embedded import IMAGE_CODECS, PGS_CODEC, Track
 from subsyncr.core.engines import EngineId
 from subsyncr.core.models import JobStatus, ReferenceKind, ReferenceTrack, SyncJob
 from subsyncr.core.queue import QueueCounts, SyncQueue
@@ -71,6 +82,9 @@ _MIN_SAMPLES_FOR_ETA = 2
 
 
 class MainWindow(QMainWindow):
+    # Emitted from a probe thread with (request, {video: tracks or None}).
+    _tracks_read = Signal(int, object)
+
     def __init__(
         self,
         *,
@@ -125,6 +139,13 @@ class MainWindow(QMainWindow):
         # Batch timing, for the estimate in the status bar.
         self._batch_started: float | None = None
         self._batch_baseline = 0
+
+        # The Sync against menu waiting on a background track read, if any:
+        # (request number, menu, jobs, tracks already known).
+        self._track_request = 0
+        self._track_menu: (
+            tuple[int, QMenu, list[SyncJob], dict[Path, list[Track] | None]] | None
+        ) = None
 
         self._build_toolbar()
         self._build_menus()
@@ -340,6 +361,9 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addMenu(self._reference_menu(menu))
         menu.exec(self.table.viewport().mapToGlobal(position))
+        # A track read still running has nowhere to show its answer now.
+        self._track_menu = None
+        menu.deleteLater()
 
     def _reference_menu(self, parent: QMenu) -> QMenu:
         """Pick what the selected jobs align against.
@@ -359,6 +383,23 @@ class MainWindow(QMainWindow):
         if not jobs:
             menu.setEnabled(False)
             return menu
+        self._fill_reference_menu(menu, jobs, {})
+        return menu
+
+    def _fill_reference_menu(
+        self,
+        menu: QMenu,
+        jobs: list[SyncJob],
+        probed: dict[Path, list[Track] | None],
+    ) -> None:
+        """(Re)build the menu from the tracks known so far.
+
+        Only tracks already read are used here. Reading one means ffprobe, a
+        second or more per video on a share, and this runs on the GUI thread:
+        any video not read yet is read in the background, and the menu fills
+        itself in when the answer arrives. ``probed`` holds those answers.
+        """
+        menu.clear()
 
         def current(job: SyncJob) -> str | None:
             track = job.reference_track
@@ -393,21 +434,35 @@ class MainWindow(QMainWindow):
                 enabled,
             )
 
-        def note(text: str) -> QMenu:
+        def note(text: str) -> None:
             menu.addAction(text).setEnabled(False)
-            return menu
 
         offer("Automatic", None)
         offer("Audio", ReferenceTrack.audio(chosen=True))
         videos = list(dict.fromkeys(job.reference_path for job in jobs))
         ffmpeg_path = jobs[0].options.environment.ffmpeg_path
+        found = {
+            video: probed[video] if video in probed else self.queue.cached_tracks(video)
+            for video in videos
+        }
+        unread = [
+            video for video in videos if video not in probed and found[video] is None
+        ]
+        if unread:
+            menu.addSeparator()
+            note("Reading tracks...")
+            self._read_tracks_later(menu, jobs, unread, ffmpeg_path, found)
+            return
         if len(videos) > 1:
-            return self._language_choices(menu, jobs, videos, ffmpeg_path, add, note)
-        tracks = self.queue.tracks_for(videos[0], ffmpeg_path)
+            self._language_choices(menu, jobs, found, add, note)
+            return
+        tracks = found[videos[0]]
         if not tracks:
             if tracks is None:
-                return note("Could not read this video's tracks")
-            return note("No subtitle tracks found")
+                note("Could not read this video's tracks")
+            else:
+                note("No subtitle tracks found")
+            return
         menu.addSeparator()
         for track in tracks:
             if track.codec in IMAGE_CODECS and track.codec != PGS_CODEC:
@@ -423,36 +478,64 @@ class MainWindow(QMainWindow):
                 choice,
                 all(reference.usable(track, job.options.engine) for job in jobs),
             )
-        return menu
 
-    def _language_choices(
+    def _read_tracks_later(
         self,
         menu: QMenu,
         jobs: list[SyncJob],
         videos: list[Path],
         ffmpeg_path: str,
+        known: dict[Path, list[Track] | None],
+    ) -> None:
+        """Probe these videos on a thread, then refill ``menu`` if still open."""
+        self._track_request += 1
+        request = self._track_request
+        self._track_menu = (request, menu, jobs, known)
+
+        def run() -> None:
+            results: dict[Path, list[Track] | None] = {}
+            for video in videos:
+                try:
+                    results[video] = self.queue.tracks_for(video, ffmpeg_path)
+                except Exception:
+                    results[video] = None
+            # Queued across threads: the slot runs on the GUI thread.
+            self._tracks_read.emit(request, results)
+
+        threading.Thread(target=run, name="subsyncr-menu-probe", daemon=True).start()
+
+    @Slot(int, object)
+    def _on_tracks_read(
+        self, request: int, results: dict[Path, list[Track] | None]
+    ) -> None:
+        pending = self._track_menu
+        if pending is None or pending[0] != request:
+            return  # The menu closed, or a newer one asked since.
+        _, menu, jobs, known = pending
+        self._track_menu = None
+        self._fill_reference_menu(menu, jobs, {**known, **results})
+
+    def _language_choices(
+        self,
+        menu: QMenu,
+        jobs: list[SyncJob],
+        found: dict[Path, list[Track] | None],
         add: Callable[[str, Callable[[], object], bool, bool], None],
-        note: Callable[[str], QMenu],
-    ) -> QMenu:
+        note: Callable[[str], None],
+    ) -> None:
         """Across several videos, offer a track by language, not by stream.
 
         Each video gets its own best full track in that language, since an
         episode's stream numbers need not match the next one's.
         """
-        # Usually instant: the queue read these when the jobs were added.
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            found = {
-                video: self.queue.tracks_for(video, ffmpeg_path) for video in videos
-            }
-        finally:
-            QApplication.restoreOverrideCursor()
         if any(tracks is None for tracks in found.values()):
-            return note("Could not read every video's tracks")
+            note("Could not read every video's tracks")
+            return
         readable = {video: tracks or [] for video, tracks in found.items()}
         choices = reference.shared_languages(list(readable.values()))
         if not choices:
-            return note("No track language all these videos share")
+            note("No track language all these videos share")
+            return
         menu.addSeparator()
         for choice in choices:
             picks = {
@@ -474,7 +557,6 @@ class MainWindow(QMainWindow):
                 job.options.engine is EngineId.FFSUBSYNC for job in jobs
             )
             add(f"{choice.label}  (each video's own track)", apply, checked, enabled)
-        return menu
 
     @Slot()
     def _open_containing_folder(self) -> None:
@@ -513,36 +595,47 @@ class MainWindow(QMainWindow):
         )
 
     def _connect_bridge(self) -> None:
+        # The bridge delivers in batches; each slot handles a whole batch, and
+        # the status bar and actions are refreshed once per delivery.
         self.bridge.queue_changed.connect(self._queue_changed)
-        self.bridge.job_changed.connect(self._job_changed)
-        self.bridge.progress.connect(self._job_progress)
-        self.bridge.log.connect(self._append_log)
+        self.bridge.jobs_changed.connect(self._jobs_changed)
+        self.bridge.progress.connect(self._jobs_progress)
+        self.bridge.logs.connect(self._append_logs)
+        self.bridge.logs_dropped.connect(self._logs_dropped)
         self.bridge.running_changed.connect(self._running_changed)
+        self.bridge.flushed.connect(self._queue_settled)
+        self._tracks_read.connect(self._on_tracks_read)
 
     # -- bridge slots ----------------------------------------------------
 
     @Slot()
     def _queue_changed(self) -> None:
         self.model.refresh()
-        self._update_status()
-        self._update_actions()
 
-    @Slot(str)
-    def _job_changed(self, job_id: str) -> None:
-        self.model.touch(job_id)
-        self._update_status()
-        self._update_actions()
+    @Slot(list)
+    def _jobs_changed(self, job_ids: list[str]) -> None:
+        self.model.touch_many(job_ids)
 
-    @Slot(str, object, str)
-    def _job_progress(self, job_id: str, fraction: object, stage: str) -> None:
-        del fraction, stage  # The job object already holds the current values.
-        self.model.touch(job_id, COLUMN_PROGRESS, COLUMN_PROGRESS)
+    @Slot(list)
+    def _jobs_progress(self, job_ids: list[str]) -> None:
+        self.model.touch_many(job_ids, COLUMN_PROGRESS, COLUMN_PROGRESS)
 
-    @Slot(str, str, str)
-    def _append_log(self, job_id: str, level: str, message: str) -> None:
-        job = self.queue.find(job_id)
-        name = job.subtitle_path.name if job else job_id.split("-", 1)[0]
-        self.log.appendPlainText(f"[{name}] {level}: {message}")
+    @Slot(list)
+    def _append_logs(self, entries: list[tuple[str, str, str]]) -> None:
+        lines: list[str] = []
+        for job_id, level, message in entries:
+            # The model's copy, not queue.find: no lock, no scan per line.
+            job = self.model.job_for_id(job_id)
+            name = job.subtitle_path.name if job else job_id.split("-", 1)[0]
+            lines.append(f"[{name}] {level}: {message}")
+        # One insertion for the batch; each line still becomes its own block.
+        self.log.appendPlainText("\n".join(lines))
+
+    @Slot(int)
+    def _logs_dropped(self, count: int) -> None:
+        self.log.appendPlainText(
+            f"[...] {count} lines not shown here; the log file has every line."
+        )
 
     @Slot(bool)
     def _running_changed(self, running: bool) -> None:
@@ -551,6 +644,9 @@ class MainWindow(QMainWindow):
             self._batch_baseline = self.queue.counts().finished
         elif not running:
             self._batch_started = None
+
+    @Slot()
+    def _queue_settled(self) -> None:
         self._update_status()
         self._update_actions()
 
@@ -865,6 +961,9 @@ class MainWindow(QMainWindow):
         self.settings.setValue("window/splitter", self.splitter.saveState())
         # Stop callbacks before tearing down, so no signal reaches a dead widget.
         self.bridge.detach()
+        # Stopping running workers can take a few seconds; hidden, the window
+        # is not left on screen looking hung while it waits.
+        self.hide()
         self.queue.shutdown()
         self.store.prune_history(self.config.history_limit)
         self.store.close()

@@ -181,6 +181,8 @@ class TrackProbe:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._tracks: dict[tuple[str, int, int], list[Track]] = {}
+        # The last answer per path, for callers that must not touch the disk.
+        self._latest: dict[str, list[Track]] = {}
 
     def tracks(self, video: Path, ffmpeg_path: str = "") -> list[Track] | None:
         """The video's subtitle tracks, or None if it could not be read."""
@@ -189,6 +191,8 @@ class TrackProbe:
             return None  # Missing, or a share that is not mounted.
         with self._lock:
             cached = self._tracks.get(key)
+            if cached is not None:
+                self._latest[str(video)] = cached
         if cached is not None:
             return cached
         found = embedded.read_tracks(video, ffmpeg_path)
@@ -196,7 +200,17 @@ class TrackProbe:
             # A failure may be a share that blinked; ask again next time.
             with self._lock:
                 self._tracks[key] = found
+                self._latest[str(video)] = found
         return found
+
+    def peek(self, video: Path) -> list[Track] | None:
+        """The tracks last read for this path, without going near the file.
+
+        For the GUI thread, where even a ``stat`` on a share that is still
+        waking up can stall the window. None means not read yet (or unreadable).
+        """
+        with self._lock:
+            return self._latest.get(str(video))
 
     def cached(self, video: Path) -> list[Track] | None:
         key = _identity(video)

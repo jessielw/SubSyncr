@@ -8,11 +8,13 @@ line was duplicated verbatim between the main window and the settings dialog.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+import threading
 
-from PySide6.QtCore import QObject, QSize, Slot
+from PySide6.QtCore import QEventLoop, QObject, QSize, Qt, Signal, Slot
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -38,6 +40,46 @@ from subsyncr.qt.sizing import INLINE_ICON_SIZE
 from subsyncr.qt.theme import ThemeManager
 
 ALL_FILES = "All files (*)"
+
+
+class _Finished(QObject):
+    done = Signal()
+
+
+def run_off_thread[T](work: Callable[[], T]) -> T:
+    """Run ``work`` on a thread and return its result, without freezing the UI.
+
+    For slow, one-shot jobs a dialog has to wait for anyway - a folder scan
+    on a network share, matching hundreds of files. The caller still gets a
+    plain return value (or the exception), but while it waits the event loop
+    keeps painting, so the window is never marked Not Responding. Mouse and
+    keyboard input is held back until the work is done, so nothing can be
+    clicked twice or closed out from under it.
+    """
+    outcome: dict[str, object] = {}
+    finished = _Finished()
+    loop = QEventLoop()
+    # Queued: delivered on this thread once the loop below is running, even
+    # if the work is over before it starts.
+    finished.done.connect(loop.quit, Qt.ConnectionType.QueuedConnection)
+
+    def target() -> None:
+        try:
+            outcome["value"] = work()
+        except BaseException as exc:  # Re-raised on the calling thread.
+            outcome["error"] = exc
+        finally:
+            finished.done.emit()
+
+    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+    try:
+        threading.Thread(target=target, name="subsyncr-ui-work", daemon=True).start()
+        loop.exec(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+    finally:
+        QApplication.restoreOverrideCursor()
+    if "error" in outcome:
+        raise outcome["error"]  # type: ignore[misc]
+    return outcome["value"]  # type: ignore[return-value]
 
 
 def _patterns(suffixes: Iterable[str]) -> str:

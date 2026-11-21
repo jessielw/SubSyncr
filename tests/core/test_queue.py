@@ -467,6 +467,39 @@ def test_cancelling_an_unknown_job_is_harmless(
     assert build_queue().cancel("no such job") is False
 
 
+def test_cancel_returns_without_waiting_for_the_worker(
+    build_queue: Callable[..., SyncQueue],
+    make_job: Callable[..., SyncJob],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancel is pressed on the GUI thread; a slow stop must not freeze it.
+
+    A real worker can take seconds to stop (grace period, terminate, kill).
+    """
+    released = threading.Event()
+
+    def slow_cancel(self: FakeProcess) -> None:
+        released.wait(5)
+        self.cancelled = True
+
+    monkeypatch.setattr(FakeProcess, "cancel", slow_cancel)
+    FakeProcess.delay = 1.0
+    queue = build_queue()
+    queue.add([make_job("A")])
+    queue.start()
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and not queue._processes:
+        time.sleep(0.01)
+
+    started = time.monotonic()
+    assert queue.cancel_all() == 1
+    assert time.monotonic() - started < 0.5
+    released.set()
+    queue.shutdown(timeout=8.0)
+    # shutdown still waited for the stop to land.
+    assert FakeProcess.instances[0].cancelled is True
+
+
 # -- engine fallback chain -----------------------------------------------
 
 

@@ -165,21 +165,50 @@ class JobTableModel(QAbstractTableModel):
 
     def refresh(self) -> None:
         """Rebuild from the queue after jobs are added, removed or reordered."""
+        jobs = self._queue.snapshot()
+        if [job.id for job in jobs] == [job.id for job in self._jobs]:
+            # Same rows (a group finishing, say): repaint rather than reset,
+            # which would throw away the selection and scroll position.
+            self._jobs = jobs
+            if jobs:
+                self.dataChanged.emit(
+                    self.index(0, 0), self.index(len(jobs) - 1, self.columnCount() - 1)
+                )
+            return
         self.beginResetModel()
-        self._jobs = self._queue.snapshot()
+        self._jobs = jobs
         self._rows = {job.id: i for i, job in enumerate(self._jobs)}
         self.endResetModel()
 
     def touch(self, job_id: str, first: int = 0, last: int | None = None) -> None:
         """Repaint one row whose underlying job mutated in place."""
-        row = self._rows.get(job_id)
-        if row is None or row >= len(self._jobs):
+        self.touch_many([job_id], first, last)
+
+    def touch_many(
+        self, job_ids: list[str], first: int = 0, last: int | None = None
+    ) -> None:
+        """Repaint these rows with a single change notification.
+
+        One notification for the span rather than one per row: each makes the
+        view re-measure its auto-sized columns, and that is the expensive part.
+        """
+        rows = [
+            row
+            for row in (self._rows.get(job_id) for job_id in job_ids)
+            if row is not None and row < len(self._jobs)
+        ]
+        if not rows:
             return
         end = self.columnCount() - 1 if last is None else last
-        self.dataChanged.emit(self.index(row, first), self.index(row, end))
+        self.dataChanged.emit(self.index(min(rows), first), self.index(max(rows), end))
 
     def job_at(self, row: int) -> SyncJob | None:
         return self._jobs[row] if 0 <= row < len(self._jobs) else None
+
+    def job_for_id(self, job_id: str) -> SyncJob | None:
+        """The job shown for this id, without asking the queue (and its lock)."""
+        row = self._rows.get(job_id)
+        return self._jobs[row] if row is not None and row < len(self._jobs) else None
 
     def jobs_for_rows(self, rows: list[int]) -> list[SyncJob]:
         return [self._jobs[row] for row in rows if 0 <= row < len(self._jobs)]
@@ -436,6 +465,12 @@ class JobTableView(QTableView):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         for column in (COLUMN_REFERENCE, COLUMN_SUBTITLE, COLUMN_RESULT):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
+        # Size those columns from the rows on screen only. Qt's default reads
+        # up to 1000 rows on every change notification, synchronously - on a
+        # long queue each progress tick cost ~140 ms, which is what froze the
+        # window mid-batch. These columns hold short labels, so the visible
+        # rows are a fair sample.
+        header.setResizeContentsPrecision(0)
 
     def paintEvent(self, event: QPaintEvent) -> None:
         super().paintEvent(event)

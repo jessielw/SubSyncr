@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.1.2] - 2026-11-20
+
+### Fixed
+
+- The window no longer stops responding while a batch runs. Each progress tick
+  made the queue table re-measure its auto-sized columns across up to 1000 rows,
+  about 140 ms per tick on a long queue. The table now measures only the rows on
+  screen, so a tick costs about 5 ms.
+- Worker events (progress, log lines, job updates) now reach the window in
+  batches, at most about ten times a second, not one repaint and status recount
+  per event. A busy batch can no longer pile up a backlog the window can't get
+  through. The log pane adds each batch in one go, and if a tool floods it, only
+  the newest lines are kept (the log file still has every line).
+- A finishing group no longer resets the queue table, so the selection and
+  scroll position stay where they were.
+- Cancel running no longer freezes the window. Stopping a worker can take up
+  to 7 seconds (grace period, then terminate, then kill), and this ran on the
+  GUI thread, one worker after another. Workers now stop in parallel in the
+  background. Quitting still waits for them, with the window hidden, up to a
+  single 10-second limit.
+- Starting a group no longer holds up the window while it checks for clashing
+  output paths. That check resolved and stat'ed every path of every other
+  queued job while holding the lock the window reads the queue through. It now
+  runs outside the lock and reads each path from disk once.
+- Saving the queue to its database no longer holds that lock either, so the
+  window doesn't wait on SQLite while workers claim or finish groups.
+- The right-click Sync against menu no longer runs ffprobe on the GUI thread
+  (once per selected video, slow on a network share). It uses tracks it has
+  already read; for the rest it shows "Reading tracks..." and fills itself in
+  once a background read finishes.
+- Match folders scans the folders and matches the files on a background thread,
+  so a large or networked folder no longer freezes the dialog.
+
 ## [0.1.1] - 2026-11-12
 
 ### Changed
